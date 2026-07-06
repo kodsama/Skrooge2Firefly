@@ -1,6 +1,6 @@
 [project]
 name = "skrooge2firefly"
-version = "0.1.0"
+version = "1.0.0"
 description = "Migrate a Skrooge SQLite file to Firefly III, and export it back"
 readme = "README.md"
 requires-python = ">=3.12"
