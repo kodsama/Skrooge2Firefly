@@ -55,3 +55,4 @@ strict = true
 [tool.coverage.run]
 source = ["skrooge2firefly"]
 branch = true
+relative_files = true

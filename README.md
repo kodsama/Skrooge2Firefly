@@ -1,7 +1,7 @@
 # Skrooge2Firefly
 
 [![CI](https://github.com/kodsama/Skrooge2Firefly/actions/workflows/ci.yml/badge.svg)](https://github.com/kodsama/Skrooge2Firefly/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/kodsama/Skrooge2Firefly/branch/main/graph/badge.svg)](https://codecov.io/gh/kodsama/Skrooge2Firefly)
+[![Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/kodsama/Skrooge2Firefly/python-coverage-comment-action-data/endpoint.json)](https://github.com/kodsama/Skrooge2Firefly/tree/python-coverage-comment-action-data)
 [![Latest tag](https://img.shields.io/github/v/tag/kodsama/Skrooge2Firefly?label=release&sort=semver)](https://github.com/kodsama/Skrooge2Firefly/tags)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](pyproject.toml)

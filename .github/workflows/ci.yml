@@ -10,6 +10,9 @@ jobs:
   test:
     name: Lint, type-check, test
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
 
@@ -32,10 +35,9 @@ jobs:
         run: uv run mypy
 
       - name: Tests with coverage
-        run: uv run pytest --cov=skrooge2firefly --cov-report=xml --cov-report=term-missing
+        run: uv run pytest --cov=skrooge2firefly --cov-report=term-missing
 
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
+      - name: Coverage badge & report
+        uses: py-cov-action/python-coverage-comment-action@v3
         with:
-          files: ./coverage.xml
-          fail_ci_if_error: false
+          GITHUB_TOKEN: ${{ github.token }}
