@@ -6,18 +6,19 @@ on:
   pull_request:
     branches: [main]
 
+# Least privilege by default; each job elevates only what it needs.
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Lint, type-check, test
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
     steps:
       - uses: actions/checkout@v4
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
         with:
           python-version: "3.12"
           enable-cache: true
@@ -37,7 +38,33 @@ jobs:
       - name: Tests with coverage
         run: uv run pytest --cov=skrooge2firefly --cov-report=term-missing
 
-      - name: Coverage badge & report
-        uses: py-cov-action/python-coverage-comment-action@v3
+      - name: Store coverage data
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-data
+          path: .coverage
+          include-hidden-files: true
+          if-no-files-found: error
+
+  # Publishes the coverage badge to a data branch. Isolated from `test` so the
+  # write-scoped token is never exposed to the lint/test steps. Push-only: on
+  # pull requests the badge is not updated, so no elevated token is needed there.
+  coverage-badge:
+    name: Coverage badge
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore coverage data
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-data
+
+      - name: Update coverage badge
+        uses: py-cov-action/python-coverage-comment-action@50d15ff8768f6d897b04e5a0805bd1a98f7096c4 # v3
         with:
           GITHUB_TOKEN: ${{ github.token }}
