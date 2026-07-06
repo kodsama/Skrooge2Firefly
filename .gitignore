@@ -1,0 +1,30 @@
+# Secrets
+.env
+
+# Skrooge export data (large binary; keep out of git)
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# Import progress ledger
+.import-state.json
+
+# CSV output
+out/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+
+# Coverage
+.coverage
+coverage.xml
+htmlcov/
