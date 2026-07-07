@@ -635,3 +635,65 @@ def test_delete_204_is_not_transient(fast_retry_client: FireflyClient):
     resp = fast_retry_client._send("DELETE", "transactions/5")
     assert resp.status_code == 204
     assert len(responses.calls) == 1
+
+
+# --- content reads and delete/update methods (upsert change detection) ---
+
+
+@responses.activate
+def test_transactions_by_external_id_carries_splits(client: FireflyClient):
+    responses.add(
+        responses.GET,
+        f"{BASE}/api/v1/transactions",
+        json={
+            "data": [
+                {
+                    "id": "100",
+                    "attributes": {
+                        "transactions": [
+                            {
+                                "external_id": "skrooge:op:1",
+                                "amount": "12.000000",
+                                "description": "ICA",
+                            }
+                        ]
+                    },
+                }
+            ],
+            "meta": {"pagination": {"current_page": 1, "total_pages": 1}},
+        },
+        status=200,
+    )
+    got = client.transactions_by_external_id()
+    assert got["skrooge:op:1"]["group_id"] == "100"
+    assert got["skrooge:op:1"]["splits"][0]["description"] == "ICA"
+
+
+@responses.activate
+def test_delete_transaction_issues_delete(client: FireflyClient):
+    responses.add(responses.DELETE, f"{BASE}/api/v1/transactions/100", status=204)
+    client.delete_transaction("100")
+    assert responses.calls[-1].request.method == "DELETE"
+
+
+@responses.activate
+def test_update_recurrence_puts(client: FireflyClient):
+    responses.add(
+        responses.PUT, f"{BASE}/api/v1/recurrences/9", json={"data": {"id": "9"}}, status=200
+    )
+    client.update_recurrence("9", {"title": "Rent"})
+    assert responses.calls[-1].request.method == "PUT"
+
+
+@responses.activate
+def test_recurrences_full_maps_title(client: FireflyClient):
+    responses.add(
+        responses.GET,
+        f"{BASE}/api/v1/recurrences",
+        json={
+            "data": [{"id": "9", "attributes": {"title": "Rent", "notes": "x"}}],
+            "meta": {"pagination": {"current_page": 1, "total_pages": 1}},
+        },
+        status=200,
+    )
+    assert client.recurrences_full()["Rent"]["id"] == "9"
