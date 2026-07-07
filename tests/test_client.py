@@ -697,3 +697,19 @@ def test_recurrences_full_maps_title(client: FireflyClient):
         status=200,
     )
     assert client.recurrences_full()["Rent"]["id"] == "9"
+
+
+@responses.activate
+def test_accounts_full_maps_name(client: FireflyClient):
+    responses.add(
+        responses.GET,
+        f"{BASE}/api/v1/accounts",
+        json={
+            "data": [{"id": "1", "attributes": {"name": "Checking", "currency_code": "SEK"}}],
+            "meta": {"pagination": {"current_page": 1, "total_pages": 1}},
+        },
+        status=200,
+    )
+    got = client.accounts_full("asset")
+    assert got["Checking"]["id"] == "1"
+    assert got["Checking"]["attributes"]["currency_code"] == "SEK"
