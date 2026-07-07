@@ -88,6 +88,9 @@ class FakeClient:
     def budget_index(self) -> dict:
         return dict(getattr(self, "existing_budgets", {}))
 
+    def list_budgets_with_limits(self) -> list:
+        return getattr(self, "existing_budget_limits_raw", [])
+
     def existing_external_ids(self, prefix: str = "skrooge:") -> set:
         return set(getattr(self, "existing_txn_ids", set()))
 
@@ -676,6 +679,20 @@ def test_existing_budget_reused_by_name(tmp_path):
     assert client.stored_budgets == []  # not recreated
     assert client.stored_budget_limits == []  # limits untouched
     assert report.counts["budget"]["skipped"] == 1
+
+
+def test_update_adds_missing_budget_limit(tmp_path):
+    client = FakeClient()
+    client.existing_budgets = {"Food": "7"}
+    client.existing_budget_limits_raw = [("Food", [])]  # budget exists, no limits yet
+    m = Mapper()
+    m.budgets = [
+        IRBudget(name="Food", limits=[BudgetLimit("2020-01-01", "2020-01-31", Decimal("500"))])
+    ]
+    writer = FireflyApiWriter(client, ledger_path=tmp_path / "s.json", update=True)
+    report = writer.write(m, only={"budgets"})
+    assert len(client.stored_budget_limits) == 1
+    assert report.counts["budget"]["updated"] == 1
 
 
 def test_assume_empty_skips_reconciliation(tmp_path):

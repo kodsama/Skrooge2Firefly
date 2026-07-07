@@ -10,7 +10,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
-from skrooge2firefly.model.entities import Account, Recurrence, Split, Transaction
+from skrooge2firefly.model.entities import Account, IRBudget, Recurrence, Split, Transaction
 from skrooge2firefly.model.mapper import Mapper
 from skrooge2firefly.writers.base import WriteReport
 from skrooge2firefly.writers.client import DuplicateTransactionError, FireflyClient, FireflyError
@@ -169,6 +169,7 @@ class FireflyApiWriter:
         self._existing_txn_content: dict[str, dict[str, Any]] = {}
         self._recurrence_index: dict[str, str] = {}
         self._existing_recurrences: dict[str, dict[str, Any]] = {}
+        self._existing_budget_limits: dict[str, set[tuple[str, str, Any]]] = {}
         self._consecutive_failures = 0
         self._account_active: dict[str, bool] = {}  # live remote active-state by name
         self._currency_decimals: dict[str, int] = {}
@@ -248,6 +249,8 @@ class FireflyApiWriter:
 
     def _reconcile(self) -> None:
         """Fetch existing state from Firefly so we reuse/skip instead of duplicating."""
+        from skrooge2firefly.writers.diffing import norm_amount
+
         self._account_index = self._client.account_index()
         self._budget_index = self._client.budget_index()
         self._existing_txn_ids = self._client.existing_external_ids()
@@ -261,6 +264,18 @@ class FireflyApiWriter:
             self._existing_group_ids = self._client.external_id_to_group_id()
             self._existing_txn_content = self._client.transactions_by_external_id()
             self._existing_recurrences = self._client.recurrences_full()
+            self._existing_budget_limits = {
+                name: {
+                    (
+                        a["attributes"]["start"],
+                        a["attributes"]["end"],
+                        norm_amount(a["attributes"]["amount"]),
+                    )
+                    for it in limits
+                    for a in [it]
+                }
+                for name, limits in self._client.list_budgets_with_limits()
+            }
         logger.info(
             "Reconciled target: %d accounts, %d budgets, %d skrooge transactions, %d recurrences",
             len(self._account_index),
@@ -567,7 +582,10 @@ class FireflyApiWriter:
                 continue
             if budget.name in self._budget_index:
                 self._ledger.record(ext)
-                report.skipped("budget")
+                if self._update:
+                    self._sync_budget_limits(budget, report)
+                else:
+                    report.skipped("budget")
                 continue
             if self._dry_run:
                 report.created("budget")  # pre-flight: would be created
@@ -586,6 +604,35 @@ class FireflyApiWriter:
                 report.failed("budget", f"{budget.name}: {exc}")
                 if self._strict:
                     raise
+
+    def _sync_budget_limits(self, budget: IRBudget, report: WriteReport) -> None:
+        """Post any of ``budget``'s limits missing on the server; report the outcome."""
+        from skrooge2firefly.writers.diffing import norm_amount
+
+        existing = self._existing_budget_limits.get(budget.name, set())
+        desired = [
+            (limit, (limit.start, limit.end, norm_amount(_amount(limit.amount))))
+            for limit in budget.limits
+        ]
+        missing = [limit for limit, key in desired if key not in existing]
+        if not missing:
+            report.skipped("budget")
+            return
+        if self._dry_run:
+            report.updated("budget")  # pre-flight: would be updated
+            return
+        budget_id = self._budget_index[budget.name]
+        try:
+            for limit in missing:
+                self._client.store_budget_limit(
+                    budget_id,
+                    {"start": limit.start, "end": limit.end, "amount": _amount(limit.amount)},
+                )
+            report.updated("budget")
+        except Exception as exc:  # noqa: BLE001
+            report.failed("budget", f"{budget.name}: {exc}")
+            if self._strict:
+                raise
 
     def _write_recurrences(self, mapper: Mapper, report: WriteReport) -> None:
         for rec in mapper.recurrences:
