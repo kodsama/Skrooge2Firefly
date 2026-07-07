@@ -1567,6 +1567,62 @@ def test_orphan_recurrence_without_marker_is_never_flagged(tmp_path: Path) -> No
     assert report.counts["orphan-recurrence"]["deleted"] == 0
 
 
+def test_dry_run_writes_decisions_file_with_orphan_choices(tmp_path: Path) -> None:
+    """A dry run with decisions_path records this run's orphan decisions to disk."""
+    from skrooge2firefly.writers import decisions
+    from skrooge2firefly.writers.orphans import FixedDecider
+
+    client = FakeClient()
+    client.existing_group_ids = {"skrooge:op:99": "900"}
+    client.existing_txn_content = {
+        "skrooge:op:99": {
+            "group_id": "900",
+            "splits": [{"external_id": "skrooge:op:99", "description": "gone"}],
+        }
+    }
+    decisions_path = tmp_path / "decisions.json"
+    writer = FireflyApiWriter(
+        client,
+        ledger_path=tmp_path / "s.json",
+        update=True,
+        dry_run=True,
+        orphan_decider=FixedDecider("delete"),
+        decisions_path=decisions_path,
+    )
+    writer.write(Mapper(), only={"transactions"})
+    assert decisions.load(decisions_path) == {"skrooge:op:99": "delete"}
+
+
+def test_real_run_applies_decisions_file_without_prompting(tmp_path: Path) -> None:
+    """A real run consults decisions_path first, never falling back to the base decider."""
+    from skrooge2firefly.writers import decisions
+
+    class _ExplodingDecider:
+        def decide(self, kind: str, key: str, label: str) -> str:
+            raise AssertionError("should never be consulted: decisions file covers this key")
+
+    client = FakeClient()
+    client.existing_group_ids = {"skrooge:op:99": "900"}
+    client.existing_txn_content = {
+        "skrooge:op:99": {
+            "group_id": "900",
+            "splits": [{"external_id": "skrooge:op:99", "description": "gone"}],
+        }
+    }
+    decisions_path = tmp_path / "decisions.json"
+    decisions.save(decisions_path, {"skrooge:op:99": "delete"})
+    writer = FireflyApiWriter(
+        client,
+        ledger_path=tmp_path / "s.json",
+        update=True,
+        orphan_decider=_ExplodingDecider(),
+        decisions_path=decisions_path,
+    )
+    report = writer.write(Mapper(), only={"transactions"})
+    assert client.deleted_transactions == ["900"]
+    assert report.counts["orphan-transaction"]["deleted"] == 1
+
+
 def test_moment_by_period_type():
     from skrooge2firefly.writers.firefly_api import _moment
 

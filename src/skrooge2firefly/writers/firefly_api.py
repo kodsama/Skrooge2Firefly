@@ -12,9 +12,10 @@ from typing import Any
 
 from skrooge2firefly.model.entities import Account, IRBudget, Recurrence, Split, Transaction
 from skrooge2firefly.model.mapper import Mapper
+from skrooge2firefly.writers import decisions
 from skrooge2firefly.writers.base import WriteReport
 from skrooge2firefly.writers.client import DuplicateTransactionError, FireflyClient, FireflyError
-from skrooge2firefly.writers.orphans import FixedDecider, OrphanDecider
+from skrooge2firefly.writers.orphans import FixedDecider, MappingDecider, OrphanDecider
 
 # Marker written into a recurrence's notes when Skrooge2Firefly created it;
 # only recurrences carrying it are ever eligible for orphan deletion.
@@ -152,6 +153,7 @@ class FireflyApiWriter:
         concurrency: int = 1,
         update: bool = False,
         orphan_decider: OrphanDecider | None = None,
+        decisions_path: Path | None = None,
     ) -> None:
         """Create the writer.
 
@@ -165,6 +167,10 @@ class FireflyApiWriter:
             update: When True, re-sync existing transactions and mirror account active state.
             orphan_decider: Decides whether to delete records present on the server but
                 absent from the newer file. Defaults to always ignoring orphans.
+            decisions_path: Path to the orphan-decisions plan file. When it exists, its
+                decisions are applied without prompting (falling back to
+                ``orphan_decider`` for keys it doesn't cover). On a dry run, the
+                decisions made this run are written back to this path.
 
         """
         self._client = client
@@ -174,7 +180,15 @@ class FireflyApiWriter:
         self._assume_empty = assume_empty
         self._concurrency = concurrency
         self._update = update
-        self._orphan_decider = orphan_decider or FixedDecider("ignore")
+        self._decisions_path = decisions_path
+        self._orphan_choices: dict[str, str] = {}
+        base_decider = orphan_decider or FixedDecider("ignore")
+        if decisions_path is not None and decisions_path.exists():
+            self._orphan_decider: OrphanDecider = MappingDecider(
+                decisions.load(decisions_path), fallback=base_decider
+            )
+        else:
+            self._orphan_decider = base_decider
         self._existing_group_ids: dict[str, str] = {}
         self._account_states: dict[str, tuple[str, bool]] = {}
         self._account_ids: dict[str, str] = {}
@@ -780,6 +794,8 @@ class FireflyApiWriter:
             self._resolve_orphan_transactions(mapper, report)
         if "recurrences" in sections:
             self._resolve_orphan_recurrences(mapper, report)
+        if self._decisions_path is not None and self._dry_run:
+            decisions.save(self._decisions_path, self._orphan_choices)
 
     def _resolve_orphan_transactions(self, mapper: Mapper, report: WriteReport) -> None:
         mapped_ids = {t.external_id for t in mapper.transactions}
@@ -794,6 +810,7 @@ class FireflyApiWriter:
             else:
                 label = key
             action = self._orphan_decider.decide("transaction", key, label)
+            self._orphan_choices[key] = action
             if action == "delete":
                 report.deleted("orphan-transaction")
                 if not self._dry_run:
@@ -811,7 +828,9 @@ class FireflyApiWriter:
         }
         for title in candidates - mapped_titles:
             recurrence_id = self._existing_recurrences[title]["id"]
-            action = self._orphan_decider.decide("recurrence", f"rec:{title}", title)
+            key = f"rec:{title}"
+            action = self._orphan_decider.decide("recurrence", key, title)
+            self._orphan_choices[key] = action
             if action == "delete":
                 report.deleted("orphan-recurrence")
                 if not self._dry_run:
