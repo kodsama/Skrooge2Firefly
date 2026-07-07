@@ -659,8 +659,8 @@ class Mapper:
     def _disambiguate_recurrence_titles(self) -> None:
         """Make every recurrence title unique.
 
-        Firefly *Bills* (subscriptions) have no external id and are matched by
-        name, so two recurrences sharing a title (e.g. several ``Insurance``
+        Firefly *recurring transactions* have no external id and are matched by
+        title, so two recurrences sharing a title (e.g. several ``Insurance``
         entries with different amounts) would collapse into one — all but the
         first silently dropped. Colliding titles get their amount/currency
         appended; any that still collide get a numeric suffix.
