@@ -131,6 +131,12 @@ class _Ledger:
             with self._path.open("a") as f:
                 f.write(external_id + "\n")
 
+    def discard(self, external_id: str) -> None:
+        """Forget *external_id* (rewrites the ledger file from the in-memory set)."""
+        if external_id in self._seen:
+            self._seen.discard(external_id)
+            self._path.write_text("".join(f"{e}\n" for e in sorted(self._seen)))
+
 
 class FireflyApiWriter:
     """Creates currencies, accounts, transactions, budgets, and recurring transactions."""
@@ -792,6 +798,7 @@ class FireflyApiWriter:
                 report.deleted("orphan-transaction")
                 if not self._dry_run:
                     self._client.delete_transaction(group_id)
+                    self._ledger.discard(key)
             else:
                 report.skipped("orphan-transaction")
 
@@ -809,5 +816,8 @@ class FireflyApiWriter:
                 report.deleted("orphan-recurrence")
                 if not self._dry_run:
                     self._client.delete_recurrence(recurrence_id)
+                    # No ledger discard here: recurrences are keyed by title, not
+                    # Skrooge external_id, and the deleted record's external_id
+                    # isn't available at this point (it's absent from the mapper).
             else:
                 report.skipped("orphan-recurrence")

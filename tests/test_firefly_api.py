@@ -1460,6 +1460,32 @@ def test_orphan_transaction_deleted_when_decider_says_delete(tmp_path: Path) -> 
     assert report.counts["orphan-transaction"]["deleted"] == 1
 
 
+def test_orphan_transaction_delete_discards_from_ledger(tmp_path: Path) -> None:
+    """Deleting an orphan transaction also forgets it in the idempotency ledger."""
+    from skrooge2firefly.writers.firefly_api import _Ledger
+    from skrooge2firefly.writers.orphans import FixedDecider
+
+    ledger_path = tmp_path / "s.json"
+    ledger_path.write_text("skrooge:op:99\n")  # prior run recorded it
+    client = FakeClient()
+    client.existing_group_ids = {"skrooge:op:99": "900"}
+    client.existing_txn_content = {
+        "skrooge:op:99": {
+            "group_id": "900",
+            "splits": [{"external_id": "skrooge:op:99", "description": "gone"}],
+        }
+    }
+    writer = FireflyApiWriter(
+        client,
+        ledger_path=ledger_path,
+        update=True,
+        orphan_decider=FixedDecider("delete"),
+    )
+    writer.write(Mapper(), only={"transactions"})
+    assert client.deleted_transactions == ["900"]
+    assert _Ledger(ledger_path).has("skrooge:op:99") is False
+
+
 def test_orphan_transaction_ignored_by_default(tmp_path: Path) -> None:
     """Without an explicit decider, orphan transactions are reported but never deleted."""
     client = FakeClient()
