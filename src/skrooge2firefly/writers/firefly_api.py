@@ -166,6 +166,7 @@ class FireflyApiWriter:
         self._account_index: dict[str, str] = {}
         self._budget_index: dict[str, str] = {}
         self._existing_txn_ids: set[str] = set()
+        self._existing_txn_content: dict[str, dict[str, Any]] = {}
         self._recurrence_index: dict[str, str] = {}
         self._consecutive_failures = 0
         self._account_active: dict[str, bool] = {}  # live remote active-state by name
@@ -257,6 +258,7 @@ class FireflyApiWriter:
             self._account_ids.setdefault(name, account_id)
         if self._update:
             self._existing_group_ids = self._client.external_id_to_group_id()
+            self._existing_txn_content = self._client.transactions_by_external_id()
         logger.info(
             "Reconciled target: %d accounts, %d budgets, %d skrooge transactions, %d recurrences",
             len(self._account_index),
@@ -450,6 +452,11 @@ class FireflyApiWriter:
                 else:
                     self._post_one_transaction(txn, report)
                 continue
+            existing = self._existing_txn_content.get(txn.external_id, {})
+            if not self._txn_changed(txn, existing):
+                self._ledger.record(txn.external_id)
+                report.skipped("transaction")
+                continue
             if self._dry_run:
                 report.updated("transaction")
                 continue
@@ -463,6 +470,28 @@ class FireflyApiWriter:
                 if self._strict:
                     raise
                 self._note_transaction_failure()
+
+    def _txn_changed(self, txn: Transaction, existing: dict[str, Any]) -> bool:
+        """Return True if any managed field differs from the transaction on the server."""
+        from skrooge2firefly.writers.diffing import norm_amount, norm_date, norm_str
+
+        desired = self._update_payload(txn)["transactions"]
+        current = existing.get("splits", [])
+        if len(desired) != len(current):
+            return True
+        for d, c in zip(desired, current, strict=True):
+            if (
+                norm_str(d.get("type")) != norm_str(c.get("type"))
+                or norm_date(str(d.get("date"))) != norm_date(str(c.get("date")))
+                or norm_amount(d["amount"]) != norm_amount(c.get("amount", "0"))
+                or norm_str(d.get("currency_code")) != norm_str(c.get("currency_code"))
+                or norm_str(d.get("description")) != norm_str(c.get("description"))
+                or norm_str(d.get("source_name")) != norm_str(c.get("source_name"))
+                or norm_str(d.get("destination_name")) != norm_str(c.get("destination_name"))
+                or norm_str(d.get("category_name")) != norm_str(c.get("category_name"))
+            ):
+                return True
+        return False
 
     def _update_payload(self, txn: Transaction) -> dict[str, Any]:
         splits = [self._split_payload(txn, s, i) for i, s in enumerate(txn.splits)]

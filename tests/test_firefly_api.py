@@ -33,6 +33,7 @@ class FakeClient:
         self.updated_transactions: list[tuple] = []
         self.updated_accounts: list[tuple] = []
         self.duplicate_next = False
+        self.existing_txn_content: dict = {}
         # Map used by find_account_id
         self._account_name_to_id: dict[str, str] = {"Checking": "10", "Landlord": "20"}
 
@@ -84,6 +85,9 @@ class FakeClient:
 
     def external_id_to_group_id(self, prefix: str = "skrooge:") -> dict:
         return dict(getattr(self, "existing_group_ids", {}))
+
+    def transactions_by_external_id(self, prefix: str = "skrooge:") -> dict:
+        return dict(getattr(self, "existing_txn_content", {}))
 
     def account_states(self, account_type: str) -> dict:
         return dict(getattr(self, "account_state_map", {})) if account_type == "asset" else {}
@@ -832,10 +836,41 @@ def test_description_prefers_notes_when_present(tmp_path):
 
 def test_update_mode_resyncs_existing_transaction(tmp_path):
     client = FakeClient()
-    client.existing_group_ids = {"skrooge:op:1": "500"}
+    m = _mapper_with_one_txn()
     writer = FireflyApiWriter(client, ledger_path=tmp_path / "s.json", update=True)
-    report = writer.write(_mapper_with_one_txn(), only={"transactions"})
+    split = writer._update_payload(m.transactions[0])["transactions"][0]
+    changed_split = dict(split)
+    changed_split["description"] = "OLD"  # differs from the mapper's real content
+    client.existing_group_ids = {"skrooge:op:1": "500"}
+    client.existing_txn_content = {"skrooge:op:1": {"group_id": "500", "splits": [changed_split]}}
+    report = writer.write(m, only={"transactions"})
     assert client.stored_transactions == []
+    assert client.updated_transactions[0][0] == "500"
+    assert report.counts["transaction"]["updated"] == 1
+
+
+def test_update_skips_unchanged_transaction(tmp_path):
+    client = FakeClient()
+    m = _mapper_with_one_txn()
+    writer = FireflyApiWriter(client, ledger_path=tmp_path / "s.json", update=True)
+    split = writer._update_payload(m.transactions[0])["transactions"][0]  # exact managed fields
+    client.existing_group_ids = {"skrooge:op:1": "500"}
+    client.existing_txn_content = {"skrooge:op:1": {"group_id": "500", "splits": [dict(split)]}}
+    report = writer.write(m, only={"transactions"})
+    assert client.updated_transactions == []
+    assert report.counts["transaction"]["skipped"] == 1
+
+
+def test_update_rewrites_changed_transaction(tmp_path):
+    client = FakeClient()
+    m = _mapper_with_one_txn()
+    writer = FireflyApiWriter(client, ledger_path=tmp_path / "s.json", update=True)
+    split = writer._update_payload(m.transactions[0])["transactions"][0]
+    changed_split = dict(split)
+    changed_split["amount"] = "999.00"  # a real value change, not just formatting
+    client.existing_group_ids = {"skrooge:op:1": "500"}
+    client.existing_txn_content = {"skrooge:op:1": {"group_id": "500", "splits": [changed_split]}}
+    report = writer.write(m, only={"transactions"})
     assert client.updated_transactions[0][0] == "500"
     assert report.counts["transaction"]["updated"] == 1
 
