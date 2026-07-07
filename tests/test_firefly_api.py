@@ -37,6 +37,8 @@ class FakeClient:
         self.existing_txn_content: dict = {}
         self.existing_recurrence_content: dict = {}
         self.updated_recurrences: list = []
+        self.deleted_transactions: list = []
+        self.deleted_recurrences: list = []
         # Map used by find_account_id
         self._account_name_to_id: dict[str, str] = {"Checking": "10", "Landlord": "20"}
 
@@ -112,6 +114,12 @@ class FakeClient:
 
     def update_account(self, account_id: str, payload: dict) -> None:
         self.updated_accounts.append((account_id, payload))
+
+    def delete_transaction(self, group_id: str) -> None:
+        self.deleted_transactions.append(group_id)
+
+    def delete_recurrence(self, recurrence_id: str) -> None:
+        self.deleted_recurrences.append(recurrence_id)
 
 
 def _mapper_with_one_txn() -> Mapper:
@@ -1427,6 +1435,110 @@ def test_next_first_date_yearly():
     from skrooge2firefly.writers.firefly_api import _next_first_date
 
     assert _next_first_date("2018-04-30", "yearly", 1, date(2026, 7, 7)) == "2027-04-30"
+
+
+def test_orphan_transaction_deleted_when_decider_says_delete(tmp_path: Path) -> None:
+    """An update-mode transaction absent from the newer file is deleted when told to."""
+    from skrooge2firefly.writers.orphans import FixedDecider
+
+    client = FakeClient()
+    client.existing_group_ids = {"skrooge:op:99": "900"}
+    client.existing_txn_content = {
+        "skrooge:op:99": {
+            "group_id": "900",
+            "splits": [{"external_id": "skrooge:op:99", "description": "gone"}],
+        }
+    }
+    writer = FireflyApiWriter(
+        client,
+        ledger_path=tmp_path / "s.json",
+        update=True,
+        orphan_decider=FixedDecider("delete"),
+    )
+    report = writer.write(Mapper(), only={"transactions"})  # empty file -> op:99 is orphan
+    assert client.deleted_transactions == ["900"]
+    assert report.counts["orphan-transaction"]["deleted"] == 1
+
+
+def test_orphan_transaction_ignored_by_default(tmp_path: Path) -> None:
+    """Without an explicit decider, orphan transactions are reported but never deleted."""
+    client = FakeClient()
+    client.existing_group_ids = {"skrooge:op:99": "900"}
+    client.existing_txn_content = {
+        "skrooge:op:99": {
+            "group_id": "900",
+            "splits": [{"external_id": "skrooge:op:99", "description": "gone"}],
+        }
+    }
+    writer = FireflyApiWriter(client, ledger_path=tmp_path / "s.json", update=True)
+    report = writer.write(Mapper(), only={"transactions"})
+    assert client.deleted_transactions == []
+    assert report.counts["orphan-transaction"]["skipped"] == 1
+
+
+def test_orphan_transaction_dry_run_previews_without_deleting(tmp_path: Path) -> None:
+    """dry_run reports the intended orphan action but performs no delete."""
+    from skrooge2firefly.writers.orphans import FixedDecider
+
+    client = FakeClient()
+    client.existing_group_ids = {"skrooge:op:99": "900"}
+    client.existing_txn_content = {
+        "skrooge:op:99": {
+            "group_id": "900",
+            "splits": [{"external_id": "skrooge:op:99", "description": "gone"}],
+        }
+    }
+    writer = FireflyApiWriter(
+        client,
+        ledger_path=tmp_path / "s.json",
+        update=True,
+        dry_run=True,
+        orphan_decider=FixedDecider("delete"),
+    )
+    report = writer.write(Mapper(), only={"transactions"})
+    assert client.deleted_transactions == []
+    assert report.counts["orphan-transaction"]["deleted"] == 1
+
+
+def test_orphan_recurrence_deleted_when_decider_says_delete(tmp_path: Path) -> None:
+    """A recurrence bearing the Skrooge marker and absent from the file is deleted."""
+    from skrooge2firefly.writers.orphans import FixedDecider
+
+    client = FakeClient()
+    client.existing_recurrence_content = {
+        "Old Rent": {
+            "id": "42",
+            "attributes": {"notes": "Imported from Skrooge recurring operation."},
+        }
+    }
+    writer = FireflyApiWriter(
+        client,
+        ledger_path=tmp_path / "s.json",
+        update=True,
+        orphan_decider=FixedDecider("delete"),
+    )
+    report = writer.write(Mapper(), only={"recurrences"})
+    assert client.deleted_recurrences == ["42"]
+    assert report.counts["orphan-recurrence"]["deleted"] == 1
+
+
+def test_orphan_recurrence_without_marker_is_never_flagged(tmp_path: Path) -> None:
+    """A recurrence without the Skrooge marker is untouched (not our data to delete)."""
+    from skrooge2firefly.writers.orphans import FixedDecider
+
+    client = FakeClient()
+    client.existing_recurrence_content = {
+        "Hand-made rule": {"id": "42", "attributes": {"notes": "set up manually"}}
+    }
+    writer = FireflyApiWriter(
+        client,
+        ledger_path=tmp_path / "s.json",
+        update=True,
+        orphan_decider=FixedDecider("delete"),
+    )
+    report = writer.write(Mapper(), only={"recurrences"})
+    assert client.deleted_recurrences == []
+    assert report.counts["orphan-recurrence"]["deleted"] == 0
 
 
 def test_moment_by_period_type():

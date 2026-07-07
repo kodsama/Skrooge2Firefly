@@ -14,6 +14,11 @@ from skrooge2firefly.model.entities import Account, IRBudget, Recurrence, Split,
 from skrooge2firefly.model.mapper import Mapper
 from skrooge2firefly.writers.base import WriteReport
 from skrooge2firefly.writers.client import DuplicateTransactionError, FireflyClient, FireflyError
+from skrooge2firefly.writers.orphans import FixedDecider, OrphanDecider
+
+# Marker written into a recurrence's notes when Skrooge2Firefly created it;
+# only recurrences carrying it are ever eligible for orphan deletion.
+_RECURRENCE_MARKER = "Imported from Skrooge recurring operation."
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +145,7 @@ class FireflyApiWriter:
         assume_empty: bool = False,
         concurrency: int = 1,
         update: bool = False,
+        orphan_decider: OrphanDecider | None = None,
     ) -> None:
         """Create the writer.
 
@@ -151,6 +157,8 @@ class FireflyApiWriter:
             assume_empty: When True, skip reconciliation reads (target known fresh).
             concurrency: Number of parallel transaction POSTs (1 = sequential).
             update: When True, re-sync existing transactions and mirror account active state.
+            orphan_decider: Decides whether to delete records present on the server but
+                absent from the newer file. Defaults to always ignoring orphans.
 
         """
         self._client = client
@@ -160,6 +168,7 @@ class FireflyApiWriter:
         self._assume_empty = assume_empty
         self._concurrency = concurrency
         self._update = update
+        self._orphan_decider = orphan_decider or FixedDecider("ignore")
         self._existing_group_ids: dict[str, str] = {}
         self._account_states: dict[str, tuple[str, bool]] = {}
         self._account_ids: dict[str, str] = {}
@@ -217,6 +226,8 @@ class FireflyApiWriter:
             self._write_budgets(mapper, report)
         if "recurrences" in sections:
             self._write_recurrences(mapper, report)
+        if self._update:
+            self._resolve_orphans(mapper, sections, report)
         if not self._dry_run:
             self._restore_account_states(mapper)
         return report
@@ -711,7 +722,7 @@ class FireflyApiWriter:
             "first_date": _next_first_date(rec.first_date, rec.repetition_type, increment, today),
             "apply_rules": False,
             "active": True,
-            "notes": "Imported from Skrooge recurring operation.",
+            "notes": _RECURRENCE_MARKER,
             "repetitions": [
                 {
                     "type": rec.repetition_type,
@@ -751,3 +762,52 @@ class FireflyApiWriter:
             or norm_str(_moment(rec.first_date, rec.repetition_type)) != norm_str(rep.get("moment"))
             or int(rec.skip) != int(rep.get("skip", 0) or 0)
         )
+
+    def _resolve_orphans(self, mapper: Mapper, sections: set[str], report: WriteReport) -> None:
+        """Delete or ignore records present on the server but missing from the file.
+
+        Only transactions (via ``skrooge:`` external_id) and recurrences (via the
+        Skrooge notes marker) carry an ownership marker; budgets and accounts have
+        none and are never candidates for deletion here.
+        """
+        if "transactions" in sections:
+            self._resolve_orphan_transactions(mapper, report)
+        if "recurrences" in sections:
+            self._resolve_orphan_recurrences(mapper, report)
+
+    def _resolve_orphan_transactions(self, mapper: Mapper, report: WriteReport) -> None:
+        mapped_ids = {t.external_id for t in mapper.transactions}
+        orphan_keys = set(self._existing_group_ids) - mapped_ids
+        for key in orphan_keys:
+            group_id = self._existing_group_ids[key]
+            content = self._existing_txn_content.get(key)
+            splits = content.get("splits") if content else None
+            if splits:
+                split = splits[0]
+                label = f"{split.get('description', '')} {split.get('amount', '')}".strip()
+            else:
+                label = key
+            action = self._orphan_decider.decide("transaction", key, label)
+            if action == "delete":
+                report.deleted("orphan-transaction")
+                if not self._dry_run:
+                    self._client.delete_transaction(group_id)
+            else:
+                report.skipped("orphan-transaction")
+
+    def _resolve_orphan_recurrences(self, mapper: Mapper, report: WriteReport) -> None:
+        mapped_titles = {r.title for r in mapper.recurrences}
+        candidates = {
+            title
+            for title, rec in self._existing_recurrences.items()
+            if _RECURRENCE_MARKER in rec.get("attributes", {}).get("notes", "")
+        }
+        for title in candidates - mapped_titles:
+            recurrence_id = self._existing_recurrences[title]["id"]
+            action = self._orphan_decider.decide("recurrence", f"rec:{title}", title)
+            if action == "delete":
+                report.deleted("orphan-recurrence")
+                if not self._dry_run:
+                    self._client.delete_recurrence(recurrence_id)
+            else:
+                report.skipped("orphan-recurrence")
