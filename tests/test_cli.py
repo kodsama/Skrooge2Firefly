@@ -430,6 +430,53 @@ def test_run_writer_passes_orphan_decider_and_decisions_path(skrooge_db, monkeyp
     assert isinstance(captured["orphan_decider"], FixedDecider)
     assert captured["orphan_decider"].decide("transaction", "k", "label") == "delete"
     assert str(captured["decisions_path"]) == "d.json"
+    assert captured["resolve_orphans"] is True
+
+
+def test_run_writer_disables_orphan_resolution_when_since_is_set(skrooge_db, monkeypatch):
+    monkeypatch.setenv("FIREFLY_TOKEN", "x")
+
+    from skrooge2firefly.writers import client as client_mod
+    from skrooge2firefly.writers import firefly_api as firefly_api_mod
+    from skrooge2firefly.writers.base import WriteReport
+
+    captured: dict = {}
+
+    class StubClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def get_version(self):
+            return "6.6.3"
+
+    class StubWriter:
+        def __init__(self, client, **kwargs):
+            captured.update(kwargs)
+
+        def write(self, mapper, only=None):
+            return WriteReport()
+
+    monkeypatch.setattr(client_mod, "FireflyClient", StubClient)
+    monkeypatch.setattr(firefly_api_mod, "FireflyApiWriter", StubWriter)
+    monkeypatch.setattr("skrooge2firefly.cli._run_verify", lambda *a, **k: 0)
+
+    code = main(
+        [
+            "--target",
+            "api",
+            "--input",
+            str(skrooge_db),
+            "--update",
+            "--since",
+            "2024-01-01",
+            "--orphans",
+            "delete",
+        ],
+        default_input="Skrooge-2026-05-30.sqlite",
+        default_url="https://firefly.example.com",
+    )
+    assert code == 0
+    assert captured["resolve_orphans"] is False
 
 
 def test_dry_run_update_reports_per_type_plan(caplog):

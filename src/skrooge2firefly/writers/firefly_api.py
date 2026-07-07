@@ -154,6 +154,7 @@ class FireflyApiWriter:
         update: bool = False,
         orphan_decider: OrphanDecider | None = None,
         decisions_path: Path | None = None,
+        resolve_orphans: bool = True,
     ) -> None:
         """Create the writer.
 
@@ -171,6 +172,10 @@ class FireflyApiWriter:
                 decisions are applied without prompting (falling back to
                 ``orphan_decider`` for keys it doesn't cover). On a dry run, the
                 decisions made this run are written back to this path.
+            resolve_orphans: When False, skip orphan resolution entirely. Must be False
+                whenever the mapper's transactions were narrowed by a date filter, since
+                orphan detection can't tell "deleted in Skrooge" from "outside the
+                window" and would otherwise delete in-range server history.
 
         """
         self._client = client
@@ -181,6 +186,7 @@ class FireflyApiWriter:
         self._concurrency = concurrency
         self._update = update
         self._decisions_path = decisions_path
+        self._resolve_orphans_enabled = resolve_orphans
         self._orphan_choices: dict[str, str] = {}
         base_decider = orphan_decider or FixedDecider("ignore")
         if decisions_path is not None and decisions_path.exists():
@@ -372,6 +378,7 @@ class FireflyApiWriter:
                 if needs_update and not self._dry_run:
                     try:
                         self._client.update_account(account_id, payload)
+                        self._account_active[acct.name] = acct.active
                         logger.info("Account %s updated", acct.name)
                         report.updated("account")
                     except Exception as exc:  # noqa: BLE001
@@ -790,6 +797,12 @@ class FireflyApiWriter:
         Skrooge notes marker) carry an ownership marker; budgets and accounts have
         none and are never candidates for deletion here.
         """
+        if not self._resolve_orphans_enabled:
+            logger.info(
+                "Orphan resolution skipped because a --since/--until date filter is "
+                "active (would misread out-of-window records as orphans)."
+            )
+            return
         if "transactions" in sections:
             self._resolve_orphan_transactions(mapper, report)
         if "recurrences" in sections:

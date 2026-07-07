@@ -1063,6 +1063,38 @@ def test_update_mode_mirrors_account_active(tmp_path):
     assert report.counts["account"]["updated"] == 1
 
 
+def test_update_mode_refreshes_active_state_after_close(tmp_path):
+    """After PUTting active=False, the writer's live tracking must reflect it
+    right away — not only at end-of-run via _restore_account_states — or
+    _activate_accounts_for_writes reads the stale value and wrongly skips
+    reactivating the account for same-run transaction writes."""
+    from skrooge2firefly.model.entities import Account
+    from skrooge2firefly.writers.base import WriteReport
+
+    client = FakeClient()
+    client.account_state_map = {"Archived": ("7", True)}
+    m = Mapper()
+    m.accounts = [
+        Account(
+            "skrooge:acct:1",
+            "Archived",
+            "asset",
+            "defaultAsset",
+            "SEK",
+            None,
+            None,
+            None,
+            "",
+            active=False,
+        ),
+    ]
+    writer = FireflyApiWriter(client, ledger_path=tmp_path / "s.json", update=True)
+    writer._reconcile()
+    writer._write_accounts(m, WriteReport())
+    assert client.updated_accounts[0][1]["active"] is False
+    assert writer._account_active["Archived"] is False
+
+
 def test_update_mode_no_account_patch_when_active_matches(tmp_path):
     from skrooge2firefly.model.entities import Account
 
@@ -1500,6 +1532,29 @@ def test_orphan_transaction_ignored_by_default(tmp_path: Path) -> None:
     report = writer.write(Mapper(), only={"transactions"})
     assert client.deleted_transactions == []
     assert report.counts["orphan-transaction"]["skipped"] == 1
+
+
+def test_orphans_not_deleted_when_resolve_orphans_false(tmp_path):
+    """A date-filtered run must not treat out-of-window server txns as orphans."""
+    from skrooge2firefly.writers.orphans import FixedDecider
+
+    client = FakeClient()
+    client.existing_group_ids = {"skrooge:op:99": "900"}
+    client.existing_txn_content = {
+        "skrooge:op:99": {
+            "group_id": "900",
+            "splits": [{"external_id": "skrooge:op:99", "description": "old history"}],
+        }
+    }
+    # mapper has NO transactions (simulating all filtered out of the window)
+    FireflyApiWriter(
+        client,
+        ledger_path=tmp_path / "s.json",
+        update=True,
+        orphan_decider=FixedDecider("delete"),
+        resolve_orphans=False,
+    ).write(Mapper(), only={"transactions"})
+    assert client.deleted_transactions == []  # nothing deleted despite delete decider
 
 
 def test_orphan_transaction_dry_run_previews_without_deleting(tmp_path: Path) -> None:

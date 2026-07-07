@@ -200,6 +200,8 @@ def main(
     )
     try:
         only = _parse_only(args.only)
+        if args.orphans and not args.update:
+            logger.warning("--orphans has no effect without --update")
         settings = Settings.resolve(
             url=args.url,
             token=args.token,
@@ -359,6 +361,7 @@ def _run_writer(
         update=args.update,
         orphan_decider=build_decider(args),
         decisions_path=args.decisions,
+        resolve_orphans=not (args.since or args.until),
     )
     return writer.write(mapper, only=only)
 
