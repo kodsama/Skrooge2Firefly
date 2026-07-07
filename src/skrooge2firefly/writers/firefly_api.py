@@ -10,7 +10,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
-from skrooge2firefly.model.entities import Account, Split, Transaction
+from skrooge2firefly.model.entities import Account, Recurrence, Split, Transaction
 from skrooge2firefly.model.mapper import Mapper
 from skrooge2firefly.writers.base import WriteReport
 from skrooge2firefly.writers.client import DuplicateTransactionError, FireflyClient, FireflyError
@@ -168,6 +168,7 @@ class FireflyApiWriter:
         self._existing_txn_ids: set[str] = set()
         self._existing_txn_content: dict[str, dict[str, Any]] = {}
         self._recurrence_index: dict[str, str] = {}
+        self._existing_recurrences: dict[str, dict[str, Any]] = {}
         self._consecutive_failures = 0
         self._account_active: dict[str, bool] = {}  # live remote active-state by name
         self._currency_decimals: dict[str, int] = {}
@@ -259,6 +260,7 @@ class FireflyApiWriter:
         if self._update:
             self._existing_group_ids = self._client.external_id_to_group_id()
             self._existing_txn_content = self._client.transactions_by_external_id()
+            self._existing_recurrences = self._client.recurrences_full()
         logger.info(
             "Reconciled target: %d accounts, %d budgets, %d skrooge transactions, %d recurrences",
             len(self._account_index),
@@ -586,43 +588,36 @@ class FireflyApiWriter:
                     raise
 
     def _write_recurrences(self, mapper: Mapper, report: WriteReport) -> None:
-        today = date.today()
         for rec in mapper.recurrences:
-            if self._ledger.has(rec.external_id) or rec.title in self._recurrence_index:
+            if self._ledger.has(rec.external_id):
+                report.skipped("recurrence")
+                continue
+            existing = self._existing_recurrences.get(rec.title) if self._update else None
+            if rec.title in self._recurrence_index or existing is not None:
+                if (
+                    self._update
+                    and existing is not None
+                    and self._recurrence_changed(rec, existing)
+                ):
+                    if self._dry_run:
+                        report.updated("recurrence")  # pre-flight: would be updated
+                        continue
+                    try:
+                        self._client.update_recurrence(
+                            existing["id"], self._recurrence_payload(rec)
+                        )
+                        report.updated("recurrence")
+                    except Exception as exc:  # noqa: BLE001
+                        report.failed("recurrence", f"{rec.title}: {exc}")
+                        if self._strict:
+                            raise
+                    continue
                 report.skipped("recurrence")
                 continue
             if self._dry_run:
                 report.created("recurrence")  # pre-flight: would be created
                 continue
-            increment = rec.skip + 1
-            payload = {
-                "type": rec.kind,
-                "title": rec.title,
-                "description": rec.description,
-                "first_date": _next_first_date(
-                    rec.first_date, rec.repetition_type, increment, today
-                ),
-                "apply_rules": False,
-                "active": True,
-                "notes": "Imported from Skrooge recurring operation.",
-                "repetitions": [
-                    {
-                        "type": rec.repetition_type,
-                        "moment": _moment(rec.first_date, rec.repetition_type),
-                        "skip": rec.skip,
-                    }
-                ],
-            }
-            txn: dict[str, Any] = {
-                "description": rec.description,
-                "amount": _amount(rec.amount),
-                "currency_code": rec.currency_code,
-                "source_name": rec.source_name,
-                "destination_name": rec.destination_name,
-            }
-            if rec.category_name:
-                txn["category_name"] = rec.category_name
-            payload["transactions"] = [txn]
+            payload = self._recurrence_payload(rec)
             try:
                 rid = self._client.store_recurrence(payload)
                 self._recurrence_index[rec.title] = rid
@@ -632,3 +627,54 @@ class FireflyApiWriter:
                 report.failed("recurrence", f"{rec.title}: {exc}")
                 if self._strict:
                     raise
+
+    def _recurrence_payload(self, rec: Recurrence) -> dict[str, Any]:
+        today = date.today()
+        increment = rec.skip + 1
+        payload: dict[str, Any] = {
+            "type": rec.kind,
+            "title": rec.title,
+            "description": rec.description,
+            "first_date": _next_first_date(rec.first_date, rec.repetition_type, increment, today),
+            "apply_rules": False,
+            "active": True,
+            "notes": "Imported from Skrooge recurring operation.",
+            "repetitions": [
+                {
+                    "type": rec.repetition_type,
+                    "moment": _moment(rec.first_date, rec.repetition_type),
+                    "skip": rec.skip,
+                }
+            ],
+        }
+        txn: dict[str, Any] = {
+            "description": rec.description,
+            "amount": _amount(rec.amount),
+            "currency_code": rec.currency_code,
+            "source_name": rec.source_name,
+            "destination_name": rec.destination_name,
+        }
+        if rec.category_name:
+            txn["category_name"] = rec.category_name
+        payload["transactions"] = [txn]
+        return payload
+
+    def _recurrence_changed(self, rec: Recurrence, existing: dict[str, Any]) -> bool:
+        """Return True if any managed field differs (excludes first_date and description)."""
+        from skrooge2firefly.writers.diffing import norm_amount, norm_str
+
+        attrs = existing.get("attributes", {})
+        reps = attrs.get("recurrence_repetitions", [{}])
+        rep = reps[0] if reps else {}
+        etx = (attrs.get("transactions") or [{}])[0]
+        etype = (attrs.get("transaction_type") or {}).get("type", "")
+        return (
+            norm_str(rec.kind) != norm_str(etype)
+            or norm_amount(_amount(rec.amount)) != norm_amount(etx.get("amount", "0"))
+            or norm_str(rec.currency_code) != norm_str(etx.get("currency_code"))
+            or norm_str(rec.source_name) != norm_str(etx.get("source_name"))
+            or norm_str(rec.destination_name) != norm_str(etx.get("destination_name"))
+            or norm_str(rec.repetition_type) != norm_str(rep.get("type"))
+            or norm_str(_moment(rec.first_date, rec.repetition_type)) != norm_str(rep.get("moment"))
+            or int(rec.skip) != int(rep.get("skip", 0) or 0)
+        )

@@ -34,6 +34,8 @@ class FakeClient:
         self.updated_accounts: list[tuple] = []
         self.duplicate_next = False
         self.existing_txn_content: dict = {}
+        self.existing_recurrence_content: dict = {}
+        self.updated_recurrences: list = []
         # Map used by find_account_id
         self._account_name_to_id: dict[str, str] = {"Checking": "10", "Landlord": "20"}
 
@@ -69,6 +71,12 @@ class FakeClient:
 
     def recurrence_index(self) -> dict[str, str]:
         return dict(getattr(self, "existing_recurrences", {}))
+
+    def recurrences_full(self) -> dict:
+        return dict(getattr(self, "existing_recurrence_content", {}))
+
+    def update_recurrence(self, rid: str, payload: dict) -> None:
+        self.updated_recurrences.append((rid, payload))
 
     def find_account_id(self, name: str) -> str | None:
         return self._account_name_to_id.get(name)
@@ -378,6 +386,60 @@ def test_recurrence_includes_category_name_when_present(tmp_path: Path) -> None:
     m.recurrences[0] = replace(m.recurrences[0], category_name="Rent")
     FireflyApiWriter(client, ledger_path=tmp_path / "s.json").write(m, only={"recurrences"})
     assert client.stored_recurrences[0]["transactions"][0]["category_name"] == "Rent"
+
+
+def test_update_skips_unchanged_recurrence(tmp_path: Path) -> None:
+    """In update mode, an unchanged recurrence is skipped, not PUT."""
+    client = FakeClient()
+    client.existing_recurrence_content = {
+        "Rent": {
+            "id": "9",
+            "attributes": {
+                "transactions": [
+                    {
+                        "amount": "800.000000",
+                        "currency_code": "SEK",
+                        "description": "Rent",
+                        "source_name": "Checking",
+                        "destination_name": "Landlord",
+                    }
+                ],
+                "recurrence_repetitions": [{"type": "monthly", "moment": "5", "skip": 0}],
+                "transaction_type": {"type": "withdrawal"},
+            },
+        }
+    }
+    writer = FireflyApiWriter(client, ledger_path=tmp_path / "s.json", update=True)
+    report = writer.write(_mapper_with_one_recurrence(), only={"recurrences"})
+    assert client.updated_recurrences == [] and client.stored_recurrences == []
+    assert report.counts["recurrence"]["skipped"] == 1
+
+
+def test_update_rewrites_changed_recurrence(tmp_path: Path) -> None:
+    """In update mode, a recurrence with a changed managed field is PUT."""
+    client = FakeClient()
+    client.existing_recurrence_content = {
+        "Rent": {
+            "id": "9",
+            "attributes": {
+                "transactions": [
+                    {
+                        "amount": "111.00",
+                        "currency_code": "SEK",
+                        "description": "Rent",
+                        "source_name": "Checking",
+                        "destination_name": "Landlord",
+                    }
+                ],
+                "recurrence_repetitions": [{"type": "monthly", "moment": "5", "skip": 0}],
+                "transaction_type": {"type": "withdrawal"},
+            },
+        }
+    }
+    writer = FireflyApiWriter(client, ledger_path=tmp_path / "s.json", update=True)
+    report = writer.write(_mapper_with_one_recurrence(), only={"recurrences"})
+    assert client.updated_recurrences[0][0] == "9"
+    assert report.counts["recurrence"]["updated"] == 1
 
 
 # ── New coverage tests ──────────────────────────────────────────────────────
