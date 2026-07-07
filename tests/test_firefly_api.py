@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -344,6 +345,17 @@ def test_dry_run_skips_recurrence(tmp_path: Path) -> None:
     )
     assert client.stored_recurrences == []
     assert report.counts["recurrence"]["created"] == 1  # pre-flight: would create
+
+
+def test_recurrence_skip_passed_through_to_repetition(tmp_path: Path) -> None:
+    """rec.skip lands verbatim in repetitions[0].skip (distinct from the date increment)."""
+    client = FakeClient()
+    m = _mapper_with_one_recurrence()
+    m.recurrences[0] = replace(m.recurrences[0], skip=2)  # every 3rd month
+    FireflyApiWriter(client, ledger_path=tmp_path / "s.json").write(m, only={"recurrences"})
+    payload = client.stored_recurrences[0]
+    assert payload["repetitions"][0]["skip"] == 2
+    assert payload["first_date"] > date.today().isoformat()
 
 
 # ── New coverage tests ──────────────────────────────────────────────────────

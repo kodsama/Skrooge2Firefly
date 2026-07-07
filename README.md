@@ -85,9 +85,9 @@ verifies that Firefly matches Skrooge and exits non-zero if anything is off.
 3. **Connect** to Firefly and verify the token.
 4. **Reconcile** against the live instance: existing accounts/budgets are reused
    by name, already-imported transactions are recognised by their `external_id`,
-   existing subscriptions by name. This makes the import safe to re-run and safe
+   existing recurring transactions by title. This makes the import safe to re-run and safe
    against a non-empty instance.
-5. **Write** currencies, accounts, transactions, budgets and subscriptions —
+5. **Write** currencies, accounts, transactions, budgets and recurring transactions —
    recording each created record in a local ledger (`.import-state.json`) so an
    interrupted run resumes exactly where it left off.
 6. **Verify** (unless `--skip-verify`): compare Firefly against Skrooge and set
@@ -96,10 +96,10 @@ verifies that Firefly matches Skrooge and exits non-zero if anything is off.
 ### Targets
 
 - `--target api` (default): writes directly to Firefly. Full fidelity —
-  includes budgets and subscriptions, reconciles, resumes, and verifies.
+  includes budgets and recurring transactions, reconciles, resumes, and verifies.
 - `--target csv --csv-out ./out`: writes CSV + config files for the
   [Firefly Data Importer](https://docs.firefly-iii.org/how-to/data-importer/).
-  Budgets and subscriptions are not representable in that format.
+  Budgets and recurring transactions are not representable in that format.
 
 ### Exit codes
 
@@ -176,11 +176,11 @@ reconciles against the live instance before writing. So:
 - an interrupted run resumes on re-run — just run the same command again;
 - it is safe against an instance that already has data (yours or a prior run):
   accounts/budgets are reused by name, transactions skipped by `external_id`,
-  subscriptions skipped by name. "Already exists" counts as *skipped*, never
+  recurring transactions skipped by title. "Already exists" counts as *skipped*, never
   *failed*.
 
 Pass `--assume-empty-target` to skip the reconciliation reads when the instance
-is known to be empty (a little faster). Use `--only accounts,transactions,budgets,subscriptions`
+is known to be empty (a little faster). Use `--only accounts,transactions,budgets,recurrences`
 to limit the run to specific sections.
 
 ## Resilience
@@ -211,7 +211,7 @@ healthy server to go faster — or keep it low if the server struggles.
 | Refund trackers | Tags |
 | Foreign-currency operations² | Converted to the account currency (original kept as foreign amount) |
 | Share / fund buys & sells³ | Tagged `security` expenses / income |
-| Budgets, recurring operations | Budgets, subscriptions (Firefly *Bills*) — API target only |
+| Budgets, recurring operations | Budgets, recurring transactions (Firefly *Recurrences*) — API target only |
 
 ¹ Skrooge encodes an account's opening balance as an operation dated
 `0000-00-00`. It's detected and imported as the Firefly opening balance (for a
@@ -239,7 +239,7 @@ Skipped (reported as warnings/counts, never as failures): template
   historical rate; Skrooge revalues holdings at *today's* rate. So a foreign
   account's live balance can differ between the two systems by exchange-rate
   movement — inherent, not a bug. Every same-currency account matches exactly.
-- **The CSV target** cannot create budgets or subscriptions.
+- **The CSV target** cannot create budgets or recurring transactions.
 
 ## Exporting back to Skrooge
 
