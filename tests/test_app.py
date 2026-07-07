@@ -64,6 +64,26 @@ def test_import_only_flag_rejected_in_export_mode():
     assert rc == 2
 
 
+def test_orphans_and_decisions_are_forwarded(monkeypatch):
+    calls = {}
+
+    def _cap(argv, **k):
+        calls["argv"] = argv
+        return 0
+
+    monkeypatch.setattr("skrooge2firefly.app.import_main", _cap)
+    rc = main(["--import", "a.sqlite", "--update", "--orphans", "delete", "--decisions", "d.json"])
+    assert rc == 0
+    argv = calls["argv"]
+    assert "--orphans" in argv and argv[argv.index("--orphans") + 1] == "delete"
+    assert "--decisions" in argv and argv[argv.index("--decisions") + 1] == "d.json"
+
+
+def test_orphans_flag_rejected_in_export_mode():
+    rc = main(["--export", "a.qif", "--orphans", "delete"])
+    assert rc == 2
+
+
 def test_csv_target_passes_output_dir(monkeypatch, tmp_path):
     calls = {}
 

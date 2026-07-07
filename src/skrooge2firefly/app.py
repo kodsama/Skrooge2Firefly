@@ -44,6 +44,8 @@ _IMPORT_ONLY = (
     "until",
     "dry_run",
     "update",
+    "orphans",
+    "decisions",
     "verify",
     "no_drill_down",
     "skip_verify",
@@ -111,6 +113,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--update", action="store_true", help="Re-sync existing records instead of skipping."
     )
     imp.add_argument(
+        "--orphans",
+        choices=["report", "delete", "ignore"],
+        default=None,
+        help="With --update: what to do with records in Firefly but absent from the "
+        "file. Default: prompt when interactive, else report.",
+    )
+    imp.add_argument(
+        "--decisions",
+        default=None,
+        help="Orphan-decisions plan file: written in --dry-run, applied on the real run.",
+    )
+    imp.add_argument(
         "--verify", action="store_true", help="Read-only parity check against the file."
     )
     imp.add_argument(
@@ -170,6 +184,10 @@ def _import_argv(args: argparse.Namespace) -> list[str]:
         argv += ["--until", args.until]
     if args.concurrency is not None:
         argv += ["--concurrency", str(args.concurrency)]
+    if args.orphans is not None:
+        argv += ["--orphans", args.orphans]
+    if args.decisions is not None:
+        argv += ["--decisions", args.decisions]
     for flag in (
         "dry_run",
         "update",

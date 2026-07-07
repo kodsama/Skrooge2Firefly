@@ -40,6 +40,8 @@ clear error (exit `2`).
 | `--until YYYY-MM-DD` | none | Only import transactions on/before this date. |
 | `--dry-run` | off | Pre-flight only: validate, write nothing. |
 | `--update` | off | Re-sync existing records instead of skipping. |
+| `--orphans {report,delete,ignore}` | prompt if interactive, else `report` | With `--update`, what to do with records Firefly has that the file no longer does. |
+| `--decisions PATH` | none | Orphan-decisions plan file: written by `--dry-run`, applied on the real run. |
 | `--verify` | off | Read-only parity check against the file (no writes). |
 | `--no-drill-down` | off | With `--verify`, skip per-month deltas. |
 | `--skip-verify` | off | Skip the automatic post-import verification. |
