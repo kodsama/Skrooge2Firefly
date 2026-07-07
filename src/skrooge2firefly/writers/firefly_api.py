@@ -583,17 +583,17 @@ class FireflyApiWriter:
                         "skip": rec.skip,
                     }
                 ],
-                "transactions": [
-                    {
-                        "description": rec.description,
-                        "amount": _amount(rec.amount),
-                        "currency_code": rec.currency_code,
-                        "source_name": rec.source_name,
-                        "destination_name": rec.destination_name,
-                        "category_name": rec.category_name,
-                    }
-                ],
             }
+            txn: dict[str, Any] = {
+                "description": rec.description,
+                "amount": _amount(rec.amount),
+                "currency_code": rec.currency_code,
+                "source_name": rec.source_name,
+                "destination_name": rec.destination_name,
+            }
+            if rec.category_name:
+                txn["category_name"] = rec.category_name
+            payload["transactions"] = [txn]
             try:
                 rid = self._client.store_recurrence(payload)
                 self._recurrence_index[rec.title] = rid

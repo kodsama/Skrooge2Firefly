@@ -358,6 +358,24 @@ def test_recurrence_skip_passed_through_to_repetition(tmp_path: Path) -> None:
     assert payload["first_date"] > date.today().isoformat()
 
 
+def test_recurrence_omits_category_name_when_uncategorized(tmp_path: Path) -> None:
+    """An uncategorized recurrence must not send category_name (matches the split builder)."""
+    client = FakeClient()
+    FireflyApiWriter(client, ledger_path=tmp_path / "s.json").write(
+        _mapper_with_one_recurrence(), only={"recurrences"}
+    )
+    assert "category_name" not in client.stored_recurrences[0]["transactions"][0]
+
+
+def test_recurrence_includes_category_name_when_present(tmp_path: Path) -> None:
+    """A categorized recurrence sends category_name in its transaction payload."""
+    client = FakeClient()
+    m = _mapper_with_one_recurrence()
+    m.recurrences[0] = replace(m.recurrences[0], category_name="Rent")
+    FireflyApiWriter(client, ledger_path=tmp_path / "s.json").write(m, only={"recurrences"})
+    assert client.stored_recurrences[0]["transactions"][0]["category_name"] == "Rent"
+
+
 # ── New coverage tests ──────────────────────────────────────────────────────
 
 
@@ -1187,6 +1205,6 @@ def test_moment_by_period_type():
     from skrooge2firefly.writers.firefly_api import _moment
 
     assert _moment("2026-07-15", "daily") == ""
-    assert _moment("2026-07-15", "weekly") == "3"       # Wednesday
+    assert _moment("2026-07-15", "weekly") == "3"  # Wednesday
     assert _moment("2026-07-15", "monthly") == "15"
     assert _moment("2026-07-15", "yearly") == "2026-07-15"
