@@ -1593,6 +1593,55 @@ def test_dry_run_writes_decisions_file_with_orphan_choices(tmp_path: Path) -> No
     assert decisions.load(decisions_path) == {"skrooge:op:99": "delete"}
 
 
+def test_partial_dry_runs_merge_into_decisions_file(tmp_path: Path) -> None:
+    """A second partial dry run (different --only section) preserves the first's choices."""
+    from skrooge2firefly.writers import decisions
+    from skrooge2firefly.writers.orphans import FixedDecider
+
+    decisions_path = tmp_path / "decisions.json"
+
+    # Run A: dry-run over transactions only -> resolves skrooge:op:99
+    client_a = FakeClient()
+    client_a.existing_group_ids = {"skrooge:op:99": "900"}
+    client_a.existing_txn_content = {
+        "skrooge:op:99": {
+            "group_id": "900",
+            "splits": [{"external_id": "skrooge:op:99", "description": "gone"}],
+        }
+    }
+    writer_a = FireflyApiWriter(
+        client_a,
+        ledger_path=tmp_path / "s.json",
+        update=True,
+        dry_run=True,
+        orphan_decider=FixedDecider("delete"),
+        decisions_path=decisions_path,
+    )
+    writer_a.write(Mapper(), only={"transactions"})
+
+    # Run B: separate dry-run over recurrences only -> resolves a different orphan
+    client_b = FakeClient()
+    client_b.existing_recurrence_content = {
+        "Netflix": {
+            "id": "42",
+            "attributes": {"notes": "Imported from Skrooge recurring operation."},
+        }
+    }
+    writer_b = FireflyApiWriter(
+        client_b,
+        ledger_path=tmp_path / "s2.json",
+        update=True,
+        dry_run=True,
+        orphan_decider=FixedDecider("delete"),
+        decisions_path=decisions_path,
+    )
+    writer_b.write(Mapper(), only={"recurrences"})
+
+    both = decisions.load(decisions_path)
+    assert "skrooge:op:99" in both
+    assert "rec:Netflix" in both
+
+
 def test_real_run_applies_decisions_file_without_prompting(tmp_path: Path) -> None:
     """A real run consults decisions_path first, never falling back to the base decider."""
     from skrooge2firefly.writers import decisions

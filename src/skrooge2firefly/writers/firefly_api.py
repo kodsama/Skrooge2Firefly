@@ -795,7 +795,9 @@ class FireflyApiWriter:
         if "recurrences" in sections:
             self._resolve_orphan_recurrences(mapper, report)
         if self._decisions_path is not None and self._dry_run:
-            decisions.save(self._decisions_path, self._orphan_choices)
+            merged = decisions.load(self._decisions_path)  # preserve prior partial-run choices
+            merged.update(self._orphan_choices)  # this run's choices win on conflict
+            decisions.save(self._decisions_path, merged)
 
     def _resolve_orphan_transactions(self, mapper: Mapper, report: WriteReport) -> None:
         mapped_ids = {t.external_id for t in mapper.transactions}
