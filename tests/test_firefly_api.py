@@ -32,6 +32,7 @@ class FakeClient:
         self.stored_recurrences: list[dict] = []
         self.updated_transactions: list[tuple] = []
         self.updated_accounts: list[tuple] = []
+        self.existing_account_attrs: dict = {}
         self.duplicate_next = False
         self.existing_txn_content: dict = {}
         self.existing_recurrence_content: dict = {}
@@ -102,6 +103,9 @@ class FakeClient:
 
     def account_states(self, account_type: str) -> dict:
         return dict(getattr(self, "account_state_map", {})) if account_type == "asset" else {}
+
+    def accounts_full(self, account_type: str) -> dict:
+        return dict(getattr(self, "existing_account_attrs", {})) if account_type == "asset" else {}
 
     def update_transaction(self, group_id: str, payload: dict) -> None:
         self.updated_transactions.append((group_id, payload))
@@ -1056,6 +1060,18 @@ def test_update_mode_no_account_patch_when_active_matches(tmp_path):
 
     client = FakeClient()
     client.account_state_map = {"Open": ("8", True)}
+    client.existing_account_attrs = {
+        "Open": {
+            "id": "8",
+            "attributes": {
+                "name": "Open",
+                "currency_code": "SEK",
+                "notes": None,
+                "account_role": "defaultAsset",
+                "active": True,
+            },
+        }
+    }
     m = Mapper()
     m.accounts = [
         Account(
@@ -1074,6 +1090,43 @@ def test_update_mode_no_account_patch_when_active_matches(tmp_path):
     writer = FireflyApiWriter(client, ledger_path=tmp_path / "s.json", update=True)
     writer.write(m, only={"accounts"})
     assert client.updated_accounts == []
+
+
+def test_update_patches_changed_account_notes(tmp_path):
+    from skrooge2firefly.model.entities import Account
+
+    client = FakeClient()
+    client.account_state_map = {"Checking": ("1", True)}
+    client.existing_account_attrs = {
+        "Checking": {
+            "id": "1",
+            "attributes": {
+                "name": "Checking",
+                "currency_code": "SEK",
+                "notes": "OLD",
+                "active": True,
+            },
+        }
+    }
+    m = Mapper()
+    m.accounts = [
+        Account(
+            "skrooge:acct:1",
+            "Checking",
+            "asset",
+            None,
+            "SEK",
+            None,
+            None,
+            None,
+            "NEW",
+            active=True,
+        ),
+    ]
+    writer = FireflyApiWriter(client, ledger_path=tmp_path / "s.json", update=True)
+    report = writer.write(m, only={"accounts"})
+    assert client.updated_accounts  # a PUT happened
+    assert report.counts["account"]["updated"] >= 1
 
 
 def test_description_combines_payee_and_category(tmp_path):

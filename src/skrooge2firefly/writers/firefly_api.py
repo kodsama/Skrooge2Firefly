@@ -173,6 +173,7 @@ class FireflyApiWriter:
         self._consecutive_failures = 0
         self._account_active: dict[str, bool] = {}  # live remote active-state by name
         self._currency_decimals: dict[str, int] = {}
+        self._existing_account_attrs: dict[str, dict[str, Any]] = {}
 
     def _fmt(self, value: Decimal, currency: str) -> str:
         """Format an amount at its currency's decimal places (default 2)."""
@@ -261,6 +262,10 @@ class FireflyApiWriter:
         for name, (account_id, _) in self._account_states.items():
             self._account_ids.setdefault(name, account_id)
         if self._update:
+            self._existing_account_attrs = {
+                **self._client.accounts_full("asset"),
+                **self._client.accounts_full("liability"),
+            }
             self._existing_group_ids = self._client.external_id_to_group_id()
             self._existing_txn_content = self._client.transactions_by_external_id()
             self._existing_recurrences = self._client.recurrences_full()
@@ -305,23 +310,44 @@ class FireflyApiWriter:
             report.created("currency")
 
     def _write_accounts(self, mapper: Mapper, report: WriteReport) -> None:
+        from skrooge2firefly.writers.diffing import norm_str
+
+        managed_keys = (
+            "currency_code",
+            "notes",
+            "account_role",
+            "liability_type",
+            "liability_direction",
+        )
         for acct in mapper.accounts:
             if self._update and acct.name in self._account_states:
                 account_id, current_active = self._account_states[acct.name]
                 self._account_ids[acct.name] = account_id
                 self._ledger.record(acct.external_id)
-                if current_active != acct.active and not self._dry_run:
+                # _account_payload hardcodes active=True (needed so freshly
+                # created accounts can immediately book transactions); an
+                # already-existing account being patched here isn't going
+                # through that create flow, so send its real desired state.
+                payload = self._account_payload(acct)
+                payload["active"] = acct.active
+                existing_attrs = self._existing_account_attrs.get(acct.name, {}).get(
+                    "attributes", {}
+                )
+                fields_differ = any(
+                    norm_str(payload.get(k)) != norm_str(existing_attrs.get(k))
+                    for k in managed_keys
+                )
+                needs_update = current_active != acct.active or fields_differ
+                if needs_update and not self._dry_run:
                     try:
-                        self._client.update_account(
-                            account_id, {"name": acct.name, "active": acct.active}
-                        )
-                        logger.info("Account %s active -> %s", acct.name, acct.active)
+                        self._client.update_account(account_id, payload)
+                        logger.info("Account %s updated", acct.name)
                         report.updated("account")
                     except Exception as exc:  # noqa: BLE001
                         report.failed("account", f"{acct.name}: {exc}")
                         if self._strict:
                             raise
-                elif current_active != acct.active:
+                elif needs_update:
                     report.updated("account")  # dry-run: would update
                 else:
                     report.skipped("account")
