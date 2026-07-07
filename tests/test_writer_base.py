@@ -23,3 +23,12 @@ def test_report_tracks_updated():
     report.updated("transaction")
     assert report.counts["transaction"]["updated"] == 2
     assert "updated" in report.summary()
+
+
+def test_report_tracks_deleted():
+    from skrooge2firefly.writers.base import WriteReport
+
+    r = WriteReport()
+    r.deleted("transaction")
+    assert r.counts["transaction"]["deleted"] == 1
+    assert "deleted" in r.summary()
