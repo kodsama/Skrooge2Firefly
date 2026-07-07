@@ -184,13 +184,13 @@ class FireflyClient:
         """Create a budget limit for ``budget_id``."""
         self._post(f"budgets/{budget_id}/limits", payload)
 
-    def store_bill(self, payload: dict[str, Any]) -> str:
-        """Create a bill (subscription) and return its id."""
-        return str(self._post("bills", payload)["data"]["id"])
+    def store_recurrence(self, payload: dict[str, Any]) -> str:
+        """Create a recurring transaction and return its id."""
+        return str(self._post("recurrences", payload)["data"]["id"])
 
-    def bill_index(self) -> dict[str, str]:
-        """Return a mapping of existing bill (subscription) name → id."""
-        return {item["attributes"]["name"]: str(item["id"]) for item in self._paged("bills")}
+    def recurrence_index(self) -> dict[str, str]:
+        """Return a mapping of existing recurring-transaction title -> id."""
+        return {item["attributes"]["title"]: str(item["id"]) for item in self._paged("recurrences")}
 
     def store_transaction(self, payload: dict[str, Any]) -> str:
         """Create a transaction group; raise DuplicateTransactionError on 422 duplicate.

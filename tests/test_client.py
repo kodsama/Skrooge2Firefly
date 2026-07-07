@@ -166,33 +166,33 @@ def test_store_budget_and_limit_and_currency(client: FireflyClient) -> None:
 
 
 @responses.activate
-def test_store_bill_returns_id(client: FireflyClient) -> None:
-    """store_bill POSTs to /bills and returns the id."""
+def test_store_recurrence_posts_and_returns_id(client: FireflyClient) -> None:
+    """store_recurrence POSTs to /recurrences and returns the id."""
     responses.add(
         responses.POST,
-        f"{BASE}/api/v1/bills",
-        json={"data": {"id": "15"}},
+        f"{BASE}/api/v1/recurrences",
+        json={"data": {"id": "42"}},
         status=200,
     )
-    assert client.store_bill({"name": "Rent", "amount_min": "800.00"}) == "15"
+    assert client.store_recurrence({"title": "Rent"}) == "42"
 
 
 @responses.activate
-def test_bill_index_returns_name_to_id_map(client: FireflyClient) -> None:
-    """bill_index returns a name→id mapping from a paged bills response."""
+def test_recurrence_index_maps_title_to_id(client: FireflyClient) -> None:
+    """recurrence_index returns a title→id mapping from a paged recurrences response."""
     responses.add(
         responses.GET,
-        f"{BASE}/api/v1/bills",
+        f"{BASE}/api/v1/recurrences",
         json={
             "data": [
-                {"id": "1", "attributes": {"name": "Rent"}},
-                {"id": "2", "attributes": {"name": "Spotify"}},
+                {"id": "1", "attributes": {"title": "Rent"}},
+                {"id": "2", "attributes": {"title": "Gym"}},
             ],
             "meta": {"pagination": {"current_page": 1, "total_pages": 1}},
         },
         status=200,
     )
-    assert client.bill_index() == {"Rent": "1", "Spotify": "2"}
+    assert client.recurrence_index() == {"Rent": "1", "Gym": "2"}
 
 
 @responses.activate
