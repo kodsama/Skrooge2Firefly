@@ -21,7 +21,7 @@ logger = logging.getLogger("skrooge2firefly")
 
 _DEFAULT_INPUT = "Skrooge.sqlite"
 _DEFAULT_URL = "https://firefly.example.com"
-_SECTIONS = ["accounts", "transactions", "budgets", "subscriptions"]
+_SECTIONS = ["accounts", "transactions", "budgets", "recurrences"]
 
 
 _EPILOG = """\

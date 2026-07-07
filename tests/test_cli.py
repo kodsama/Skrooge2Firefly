@@ -1,6 +1,9 @@
 from pathlib import Path
 
-from skrooge2firefly.cli import build_parser, main
+import pytest
+
+from skrooge2firefly.cli import _parse_only, build_parser, main
+from skrooge2firefly.config import ConfigError
 
 
 def test_parser_defaults():
@@ -303,3 +306,13 @@ def test_dry_run_verifies_connectivity(skrooge_db, populate, monkeypatch):
         default_url="https://firefly.example.com",
     )
     assert code == 2
+
+
+def test_parse_only_accepts_recurrences():
+    assert _parse_only("recurrences") == {"recurrences"}
+
+
+def test_parse_only_rejects_subscriptions():
+    # the old section name is no longer valid after the rename to "recurrences"
+    with pytest.raises(ConfigError):
+        _parse_only("subscriptions")

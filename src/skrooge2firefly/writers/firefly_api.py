@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import calendar
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -15,23 +17,62 @@ from skrooge2firefly.writers.client import DuplicateTransactionError, FireflyCli
 
 logger = logging.getLogger(__name__)
 
-_ALL_SECTIONS = {"accounts", "transactions", "budgets", "subscriptions"}
+_ALL_SECTIONS = {"accounts", "transactions", "budgets", "recurrences"}
 
 # Abort the run when this many transactions fail back-to-back: the server is
 # down, and burning through the rest of the queue would only produce noise.
 _MAX_CONSECUTIVE_FAILURES = 15
 
 
-_BILL_FREQ = {"daily": "weekly", "weekly": "weekly", "monthly": "monthly", "yearly": "yearly"}
+def _add_months(d: date, months: int) -> date:
+    """Add ``months`` to ``d``, clamping the day to the target month's length."""
+    total = d.month - 1 + months
+    year = d.year + total // 12
+    month = total % 12 + 1
+    last = calendar.monthrange(year, month)[1]
+    return date(year, month, min(d.day, last))
+
+
+def _next_first_date(anchor: str, repetition_type: str, increment: int, today: date) -> str:
+    """Return the first occurrence strictly after ``today``.
+
+    Firefly requires a recurring transaction's first execution date to be in the
+    future; Skrooge anchors are historical. Step forward by whole ``increment``
+    periods from the anchor so the original phase (day-of-month/weekday) is kept.
+    """
+    start = date.fromisoformat(anchor)
+    increment = max(increment, 1)
+    if start > today:
+        return start.isoformat()
+    k = 1
+    while True:
+        if repetition_type == "daily":
+            cand = start + timedelta(days=increment * k)
+        elif repetition_type == "weekly":
+            cand = start + timedelta(weeks=increment * k)
+        elif repetition_type == "yearly":
+            cand = _add_months(start, 12 * increment * k)
+        else:  # monthly (and any unknown type, matching the mapper default)
+            cand = _add_months(start, increment * k)
+        if cand > today:
+            return cand.isoformat()
+        k += 1
+
+
+def _moment(anchor: str, repetition_type: str) -> str:
+    """Return the Firefly ``repetitions[].moment`` for an anchor date."""
+    d = date.fromisoformat(anchor)
+    if repetition_type == "daily":
+        return ""
+    if repetition_type == "weekly":
+        return str(d.isoweekday())
+    if repetition_type == "yearly":
+        return d.isoformat()
+    return str(d.day)
 
 
 def _amount(value: Decimal, decimals: int = 2) -> str:
     return f"{value:.{decimals}f}"
-
-
-def _bill_freq(repetition_type: str) -> str:
-    """Map an IR repetition type to a Firefly bill repeat frequency."""
-    return _BILL_FREQ.get(repetition_type, "monthly")
 
 
 def _transaction_issue(payload: dict[str, Any]) -> str | None:
@@ -87,7 +128,7 @@ class _Ledger:
 
 
 class FireflyApiWriter:
-    """Creates currencies, accounts, transactions, budgets and subscriptions (bills) via the API."""
+    """Creates currencies, accounts, transactions, budgets, and recurring transactions."""
 
     def __init__(
         self,
@@ -125,7 +166,7 @@ class FireflyApiWriter:
         self._account_index: dict[str, str] = {}
         self._budget_index: dict[str, str] = {}
         self._existing_txn_ids: set[str] = set()
-        self._bill_index: dict[str, str] = {}
+        self._recurrence_index: dict[str, str] = {}
         self._consecutive_failures = 0
         self._account_active: dict[str, bool] = {}  # live remote active-state by name
         self._currency_decimals: dict[str, int] = {}
@@ -170,8 +211,8 @@ class FireflyApiWriter:
             self._write_transactions(mapper, report)
         if "budgets" in sections:
             self._write_budgets(mapper, report)
-        if "subscriptions" in sections:
-            self._write_bills(mapper, report)
+        if "recurrences" in sections:
+            self._write_recurrences(mapper, report)
         if not self._dry_run:
             self._restore_account_states(mapper)
         return report
@@ -208,7 +249,7 @@ class FireflyApiWriter:
         self._account_index = self._client.account_index()
         self._budget_index = self._client.budget_index()
         self._existing_txn_ids = self._client.existing_external_ids()
-        self._bill_index = self._client.bill_index()
+        self._recurrence_index = self._client.recurrence_index()
         self._account_states = self._client.account_states("asset")
         self._account_states.update(self._client.account_states("liability"))
         self._account_active = {name: active for name, (_, active) in self._account_states.items()}
@@ -217,11 +258,11 @@ class FireflyApiWriter:
         if self._update:
             self._existing_group_ids = self._client.external_id_to_group_id()
         logger.info(
-            "Reconciled target: %d accounts, %d budgets, %d skrooge transactions, %d subscriptions",
+            "Reconciled target: %d accounts, %d budgets, %d skrooge transactions, %d recurrences",
             len(self._account_index),
             len(self._budget_index),
             len(self._existing_txn_ids),
-            len(self._bill_index),
+            len(self._recurrence_index),
         )
 
     def _ensure_currencies(self, mapper: Mapper, report: WriteReport) -> None:
@@ -515,35 +556,50 @@ class FireflyApiWriter:
                 if self._strict:
                     raise
 
-    def _write_bills(self, mapper: Mapper, report: WriteReport) -> None:
+    def _write_recurrences(self, mapper: Mapper, report: WriteReport) -> None:
+        today = date.today()
         for rec in mapper.recurrences:
-            if self._ledger.has(rec.external_id):
-                report.skipped("subscription")
-                continue
-            if rec.title in self._bill_index:
-                report.skipped("subscription")
+            if self._ledger.has(rec.external_id) or rec.title in self._recurrence_index:
+                report.skipped("recurrence")
                 continue
             if self._dry_run:
-                report.created("subscription")  # pre-flight: would be created
+                report.created("recurrence")  # pre-flight: would be created
                 continue
-            amount = _amount(rec.amount)
+            increment = rec.skip + 1
             payload = {
-                "name": rec.title,
-                "amount_min": amount,
-                "amount_max": amount,
-                "date": rec.first_date,
-                "repeat_freq": _bill_freq(rec.repetition_type),
-                "skip": rec.skip,
+                "type": rec.kind,
+                "title": rec.title,
+                "description": rec.description,
+                "first_date": _next_first_date(
+                    rec.first_date, rec.repetition_type, increment, today
+                ),
+                "apply_rules": False,
                 "active": True,
-                "currency_code": rec.currency_code,
                 "notes": "Imported from Skrooge recurring operation.",
+                "repetitions": [
+                    {
+                        "type": rec.repetition_type,
+                        "moment": _moment(rec.first_date, rec.repetition_type),
+                        "skip": rec.skip,
+                    }
+                ],
             }
+            txn: dict[str, Any] = {
+                "description": rec.description,
+                "amount": _amount(rec.amount),
+                "currency_code": rec.currency_code,
+                "source_name": rec.source_name,
+                "destination_name": rec.destination_name,
+            }
+            if rec.category_name:
+                txn["category_name"] = rec.category_name
+            payload["transactions"] = [txn]
             try:
-                bid = self._client.store_bill(payload)
-                self._bill_index[rec.title] = bid
+                rid = self._client.store_recurrence(payload)
+                self._recurrence_index[rec.title] = rid
                 self._ledger.record(rec.external_id)
-                report.created("subscription")
+                report.created("recurrence")
             except Exception as exc:  # noqa: BLE001
-                report.failed("subscription", f"{rec.title}: {exc}")
+                report.failed("recurrence", f"{rec.title}: {exc}")
                 if self._strict:
                     raise

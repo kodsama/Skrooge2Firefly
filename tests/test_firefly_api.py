@@ -1,3 +1,5 @@
+from dataclasses import replace
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
@@ -27,7 +29,7 @@ class FakeClient:
         self.stored_transactions: list[dict] = []
         self.stored_budgets: list[dict] = []
         self.stored_budget_limits: list[tuple[str, dict]] = []
-        self.stored_bills: list[dict] = []
+        self.stored_recurrences: list[dict] = []
         self.updated_transactions: list[tuple] = []
         self.updated_accounts: list[tuple] = []
         self.duplicate_next = False
@@ -60,12 +62,12 @@ class FakeClient:
     def store_budget_limit(self, budget_id: str, payload: dict) -> None:
         self.stored_budget_limits.append((budget_id, payload))
 
-    def store_bill(self, payload: dict) -> str:
-        self.stored_bills.append(payload)
-        return str(len(self.stored_bills))
+    def store_recurrence(self, payload: dict) -> str:
+        self.stored_recurrences.append(payload)
+        return str(len(self.stored_recurrences))
 
-    def bill_index(self) -> dict[str, str]:
-        return dict(getattr(self, "existing_bills", {}))
+    def recurrence_index(self) -> dict[str, str]:
+        return dict(getattr(self, "existing_recurrences", {}))
 
     def find_account_id(self, name: str) -> str | None:
         return self._account_name_to_id.get(name)
@@ -272,18 +274,7 @@ def test_ledger_skips_already_seen_external_id(tmp_path: Path):
     assert report.counts["transaction"]["skipped"] == 1
 
 
-# A6: _bill_freq mapping
-def test_bill_freq_mapping() -> None:
-    from skrooge2firefly.writers.firefly_api import _bill_freq
-
-    assert _bill_freq("daily") == "weekly"
-    assert _bill_freq("weekly") == "weekly"
-    assert _bill_freq("monthly") == "monthly"
-    assert _bill_freq("yearly") == "yearly"
-    assert _bill_freq("unknown") == "monthly"
-
-
-# Bill write-path tests
+# Recurrence write-path tests
 def _mapper_with_one_recurrence(
     title: str = "Rent",
     repetition_type: str = "monthly",
@@ -315,41 +306,74 @@ def _mapper_with_one_recurrence(
     return m
 
 
-def test_recurrence_imported_as_bill(tmp_path: Path) -> None:
-    """A Recurrence is stored as a Firefly bill with the correct payload fields."""
+def test_recurrence_imported_as_recurring_transaction(tmp_path: Path) -> None:
+    """A Recurrence is stored via POST /recurrences with the correct payload."""
     client = FakeClient()
-    FireflyApiWriter(client, ledger_path=tmp_path / "s.json").write(
-        _mapper_with_one_recurrence(), only={"subscriptions"}
-    )
-    assert len(client.stored_bills) == 1
-    bill = client.stored_bills[0]
-    assert bill["name"] == "Rent"
-    assert bill["amount_min"] == "800.00"
-    assert bill["amount_max"] == "800.00"
-    assert bill["repeat_freq"] == "monthly"
-    assert bill["date"] == "2020-06-05"
-    assert bill["currency_code"] == "SEK"
-
-
-def test_existing_bill_skipped_by_name(tmp_path: Path) -> None:
-    """When a bill with the same name already exists, no store_bill call is made."""
-    client = FakeClient()
-    client.existing_bills = {"Rent": "5"}
     report = FireflyApiWriter(client, ledger_path=tmp_path / "s.json").write(
-        _mapper_with_one_recurrence(), only={"subscriptions"}
+        _mapper_with_one_recurrence(), only={"recurrences"}
     )
-    assert client.stored_bills == []
-    assert report.counts["subscription"]["skipped"] == 1
+    assert len(client.stored_recurrences) == 1
+    payload = client.stored_recurrences[0]
+    assert payload["type"] == "withdrawal"
+    assert payload["title"] == "Rent"
+    assert payload["repetitions"][0]["type"] == "monthly"
+    assert payload["repetitions"][0]["skip"] == 0
+    assert payload["repetitions"][0]["moment"] == "5"
+    assert payload["transactions"][0]["amount"] == "800.00"
+    assert payload["transactions"][0]["source_name"] == "Checking"
+    assert payload["transactions"][0]["destination_name"] == "Landlord"
+    assert payload["first_date"] > date.today().isoformat()
+    assert report.counts["recurrence"]["created"] == 1
 
 
-def test_dry_run_skips_subscription(tmp_path: Path) -> None:
-    """dry_run=True makes no writes but previews the bill as would-create."""
+def test_existing_recurrence_skipped_by_title(tmp_path: Path) -> None:
+    """When a recurrence with the same title already exists, no store_recurrence call is made."""
+    client = FakeClient()
+    client.existing_recurrences = {"Rent": "5"}
+    report = FireflyApiWriter(client, ledger_path=tmp_path / "s.json").write(
+        _mapper_with_one_recurrence(), only={"recurrences"}
+    )
+    assert client.stored_recurrences == []
+    assert report.counts["recurrence"]["skipped"] == 1
+
+
+def test_dry_run_skips_recurrence(tmp_path: Path) -> None:
+    """dry_run=True makes no writes but previews the recurrence as would-create."""
     client = FakeClient()
     report = FireflyApiWriter(client, ledger_path=tmp_path / "s.json", dry_run=True).write(
-        _mapper_with_one_recurrence(), only={"subscriptions"}
+        _mapper_with_one_recurrence(), only={"recurrences"}
     )
-    assert client.stored_bills == []
-    assert report.counts["subscription"]["created"] == 1  # pre-flight: would create
+    assert client.stored_recurrences == []
+    assert report.counts["recurrence"]["created"] == 1  # pre-flight: would create
+
+
+def test_recurrence_skip_passed_through_to_repetition(tmp_path: Path) -> None:
+    """rec.skip lands verbatim in repetitions[0].skip (distinct from the date increment)."""
+    client = FakeClient()
+    m = _mapper_with_one_recurrence()
+    m.recurrences[0] = replace(m.recurrences[0], skip=2)  # every 3rd month
+    FireflyApiWriter(client, ledger_path=tmp_path / "s.json").write(m, only={"recurrences"})
+    payload = client.stored_recurrences[0]
+    assert payload["repetitions"][0]["skip"] == 2
+    assert payload["first_date"] > date.today().isoformat()
+
+
+def test_recurrence_omits_category_name_when_uncategorized(tmp_path: Path) -> None:
+    """An uncategorized recurrence must not send category_name (matches the split builder)."""
+    client = FakeClient()
+    FireflyApiWriter(client, ledger_path=tmp_path / "s.json").write(
+        _mapper_with_one_recurrence(), only={"recurrences"}
+    )
+    assert "category_name" not in client.stored_recurrences[0]["transactions"][0]
+
+
+def test_recurrence_includes_category_name_when_present(tmp_path: Path) -> None:
+    """A categorized recurrence sends category_name in its transaction payload."""
+    client = FakeClient()
+    m = _mapper_with_one_recurrence()
+    m.recurrences[0] = replace(m.recurrences[0], category_name="Rent")
+    FireflyApiWriter(client, ledger_path=tmp_path / "s.json").write(m, only={"recurrences"})
+    assert client.stored_recurrences[0]["transactions"][0]["category_name"] == "Rent"
 
 
 # ── New coverage tests ──────────────────────────────────────────────────────
@@ -1135,3 +1159,52 @@ def test_dry_run_reconciles_and_marks_existing_as_skipped(tmp_path: Path):
     )
     assert report.counts["transaction"]["skipped"] == 1
     assert report.counts["transaction"]["created"] == 0
+
+
+def test_next_first_date_monthly_rolls_past_anchor_forward_preserving_day():
+    from skrooge2firefly.writers.firefly_api import _next_first_date
+
+    # anchor in the past, every month; next occurrence after 2026-07-07 is the 15th
+    assert _next_first_date("2020-03-15", "monthly", 1, date(2026, 7, 7)) == "2026-07-15"
+
+
+def test_next_first_date_already_future_is_unchanged():
+    from skrooge2firefly.writers.firefly_api import _next_first_date
+
+    assert _next_first_date("2026-09-01", "monthly", 1, date(2026, 7, 7)) == "2026-09-01"
+
+
+def test_next_first_date_every_two_months_keeps_phase():
+    from skrooge2firefly.writers.firefly_api import _next_first_date
+
+    # every 2 months from Jan 2020 on the 10th -> odd months; next after 2026-07-07
+    assert _next_first_date("2020-01-10", "monthly", 2, date(2026, 7, 7)) == "2026-07-10"
+
+
+def test_next_first_date_month_end_clamps_short_month():
+    from skrooge2firefly.writers.firefly_api import _next_first_date
+
+    # 31st, monthly; February target clamps to 28/29
+    assert _next_first_date("2020-01-31", "monthly", 1, date(2026, 1, 31)) == "2026-02-28"
+
+
+def test_next_first_date_weekly_and_daily():
+    from skrooge2firefly.writers.firefly_api import _next_first_date
+
+    assert _next_first_date("2020-01-01", "weekly", 1, date(2026, 7, 7)) == "2026-07-08"
+    assert _next_first_date("2026-07-06", "daily", 1, date(2026, 7, 7)) == "2026-07-08"
+
+
+def test_next_first_date_yearly():
+    from skrooge2firefly.writers.firefly_api import _next_first_date
+
+    assert _next_first_date("2018-04-30", "yearly", 1, date(2026, 7, 7)) == "2027-04-30"
+
+
+def test_moment_by_period_type():
+    from skrooge2firefly.writers.firefly_api import _moment
+
+    assert _moment("2026-07-15", "daily") == ""
+    assert _moment("2026-07-15", "weekly") == "3"  # Wednesday
+    assert _moment("2026-07-15", "monthly") == "15"
+    assert _moment("2026-07-15", "yearly") == "2026-07-15"
