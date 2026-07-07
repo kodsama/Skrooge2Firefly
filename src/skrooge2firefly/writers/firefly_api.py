@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import calendar
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -22,7 +24,51 @@ _ALL_SECTIONS = {"accounts", "transactions", "budgets", "subscriptions"}
 _MAX_CONSECUTIVE_FAILURES = 15
 
 
-_BILL_FREQ = {"daily": "weekly", "weekly": "weekly", "monthly": "monthly", "yearly": "yearly"}
+def _add_months(d: date, months: int) -> date:
+    """Add ``months`` to ``d``, clamping the day to the target month's length."""
+    total = d.month - 1 + months
+    year = d.year + total // 12
+    month = total % 12 + 1
+    last = calendar.monthrange(year, month)[1]
+    return date(year, month, min(d.day, last))
+
+
+def _next_first_date(anchor: str, repetition_type: str, increment: int, today: date) -> str:
+    """Return the first occurrence strictly after ``today``.
+
+    Firefly requires a recurring transaction's first execution date to be in the
+    future; Skrooge anchors are historical. Step forward by whole ``increment``
+    periods from the anchor so the original phase (day-of-month/weekday) is kept.
+    """
+    start = date.fromisoformat(anchor)
+    increment = max(increment, 1)
+    if start > today:
+        return start.isoformat()
+    k = 1
+    while True:
+        if repetition_type == "daily":
+            cand = start + timedelta(days=increment * k)
+        elif repetition_type == "weekly":
+            cand = start + timedelta(weeks=increment * k)
+        elif repetition_type == "yearly":
+            cand = _add_months(start, 12 * increment * k)
+        else:  # monthly (and any unknown type, matching the mapper default)
+            cand = _add_months(start, increment * k)
+        if cand > today:
+            return cand.isoformat()
+        k += 1
+
+
+def _moment(anchor: str, repetition_type: str) -> str:
+    """Return the Firefly ``repetitions[].moment`` for an anchor date."""
+    d = date.fromisoformat(anchor)
+    if repetition_type == "daily":
+        return ""
+    if repetition_type == "weekly":
+        return str(d.isoweekday())
+    if repetition_type == "yearly":
+        return d.isoformat()
+    return str(d.day)
 
 
 def _amount(value: Decimal, decimals: int = 2) -> str:
@@ -31,7 +77,9 @@ def _amount(value: Decimal, decimals: int = 2) -> str:
 
 def _bill_freq(repetition_type: str) -> str:
     """Map an IR repetition type to a Firefly bill repeat frequency."""
-    return _BILL_FREQ.get(repetition_type, "monthly")
+    return {"daily": "weekly", "weekly": "weekly", "monthly": "monthly", "yearly": "yearly"}.get(
+        repetition_type, "monthly"
+    )
 
 
 def _transaction_issue(payload: dict[str, Any]) -> str | None:

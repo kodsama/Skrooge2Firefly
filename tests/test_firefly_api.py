@@ -1,3 +1,4 @@
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
@@ -1135,3 +1136,52 @@ def test_dry_run_reconciles_and_marks_existing_as_skipped(tmp_path: Path):
     )
     assert report.counts["transaction"]["skipped"] == 1
     assert report.counts["transaction"]["created"] == 0
+
+
+def test_next_first_date_monthly_rolls_past_anchor_forward_preserving_day():
+    from skrooge2firefly.writers.firefly_api import _next_first_date
+
+    # anchor in the past, every month; next occurrence after 2026-07-07 is the 15th
+    assert _next_first_date("2020-03-15", "monthly", 1, date(2026, 7, 7)) == "2026-07-15"
+
+
+def test_next_first_date_already_future_is_unchanged():
+    from skrooge2firefly.writers.firefly_api import _next_first_date
+
+    assert _next_first_date("2026-09-01", "monthly", 1, date(2026, 7, 7)) == "2026-09-01"
+
+
+def test_next_first_date_every_two_months_keeps_phase():
+    from skrooge2firefly.writers.firefly_api import _next_first_date
+
+    # every 2 months from Jan 2020 on the 10th -> odd months; next after 2026-07-07
+    assert _next_first_date("2020-01-10", "monthly", 2, date(2026, 7, 7)) == "2026-07-10"
+
+
+def test_next_first_date_month_end_clamps_short_month():
+    from skrooge2firefly.writers.firefly_api import _next_first_date
+
+    # 31st, monthly; February target clamps to 28/29
+    assert _next_first_date("2020-01-31", "monthly", 1, date(2026, 1, 31)) == "2026-02-28"
+
+
+def test_next_first_date_weekly_and_daily():
+    from skrooge2firefly.writers.firefly_api import _next_first_date
+
+    assert _next_first_date("2020-01-01", "weekly", 1, date(2026, 7, 7)) == "2026-07-08"
+    assert _next_first_date("2026-07-06", "daily", 1, date(2026, 7, 7)) == "2026-07-08"
+
+
+def test_next_first_date_yearly():
+    from skrooge2firefly.writers.firefly_api import _next_first_date
+
+    assert _next_first_date("2018-04-30", "yearly", 1, date(2026, 7, 7)) == "2027-04-30"
+
+
+def test_moment_by_period_type():
+    from skrooge2firefly.writers.firefly_api import _moment
+
+    assert _moment("2026-07-15", "daily") == ""
+    assert _moment("2026-07-15", "weekly") == "3"       # Wednesday
+    assert _moment("2026-07-15", "monthly") == "15"
+    assert _moment("2026-07-15", "yearly") == "2026-07-15"
