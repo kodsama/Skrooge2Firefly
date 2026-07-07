@@ -861,6 +861,22 @@ def test_update_skips_unchanged_transaction(tmp_path):
     assert report.counts["transaction"]["skipped"] == 1
 
 
+def test_update_skips_when_only_amount_precision_and_date_tz_differ(tmp_path):
+    """Normalized compare: 6dp amount + TZ datetime from Firefly is NOT a change."""
+    client = FakeClient()
+    m = _mapper_with_one_txn()
+    writer = FireflyApiWriter(client, ledger_path=tmp_path / "s.json", update=True)
+    split = dict(writer._update_payload(m.transactions[0])["transactions"][0])
+    # Firefly returns amounts at 6dp and dates as TZ datetimes; same value, different form.
+    split["amount"] = str(Decimal(split["amount"])) + "0000"  # e.g. "12.50" -> "12.500000"
+    split["date"] = split["date"] + "T00:00:00+02:00"
+    client.existing_group_ids = {"skrooge:op:1": "500"}
+    client.existing_txn_content = {"skrooge:op:1": {"group_id": "500", "splits": [split]}}
+    report = writer.write(m, only={"transactions"})
+    assert client.updated_transactions == []  # normalized -> no PUT
+    assert report.counts["transaction"]["skipped"] == 1
+
+
 def test_update_rewrites_changed_transaction(tmp_path):
     client = FakeClient()
     m = _mapper_with_one_txn()
