@@ -577,7 +577,7 @@ class FireflyApiWriter:
     def _write_budgets(self, mapper: Mapper, report: WriteReport) -> None:
         for budget in mapper.budgets:
             ext = f"skrooge:budget:{budget.name}"
-            if self._ledger.has(ext):
+            if self._ledger.has(ext) and not self._update:
                 report.skipped("budget")
                 continue
             if budget.name in self._budget_index:
@@ -636,7 +636,7 @@ class FireflyApiWriter:
 
     def _write_recurrences(self, mapper: Mapper, report: WriteReport) -> None:
         for rec in mapper.recurrences:
-            if self._ledger.has(rec.external_id):
+            if self._ledger.has(rec.external_id) and not self._update:
                 report.skipped("recurrence")
                 continue
             existing = self._existing_recurrences.get(rec.title) if self._update else None

@@ -445,6 +445,51 @@ def test_update_rewrites_changed_recurrence(tmp_path: Path) -> None:
     assert report.counts["recurrence"]["updated"] == 1
 
 
+# Bug fix: the ledger short-circuit must not skip change-detection in update mode
+def test_update_syncs_budget_limit_even_when_ledger_has_it(tmp_path: Path) -> None:
+    """A budget already in the ledger (from a prior run) still gets its new limits synced."""
+    ledger = tmp_path / "s.json"
+    ledger.write_text("skrooge:budget:Food\n")  # prior run recorded this budget
+    client = FakeClient()
+    client.existing_budgets = {"Food": "7"}  # budget already on server
+    client.existing_budget_limits_raw = [("Food", [])]  # but with no limits yet
+    m = Mapper()
+    m.budgets = [IRBudget("Food", [BudgetLimit("2020-02-01", "2020-02-28", Decimal("500"))])]
+    report = FireflyApiWriter(client, ledger_path=ledger, update=True).write(m, only={"budgets"})
+    assert len(client.stored_budget_limits) == 1  # the new limit was posted
+    assert report.counts["budget"]["updated"] == 1
+
+
+def test_update_rewrites_changed_recurrence_even_when_ledger_has_it(tmp_path: Path) -> None:
+    """A recurrence already in the ledger (from a prior run) still gets rewritten on change."""
+    ledger = tmp_path / "s.json"
+    ledger.write_text("skrooge:rec:2\n")  # prior run recorded this recurrence
+    client = FakeClient()
+    client.existing_recurrence_content = {
+        "Rent": {
+            "id": "9",
+            "attributes": {
+                "transactions": [
+                    {
+                        "amount": "111.00",
+                        "currency_code": "SEK",
+                        "description": "Rent",
+                        "source_name": "Checking",
+                        "destination_name": "Landlord",
+                    }
+                ],
+                "recurrence_repetitions": [{"type": "monthly", "moment": "5", "skip": 0}],
+                "transaction_type": {"type": "withdrawal"},
+            },
+        }
+    }
+    report = FireflyApiWriter(client, ledger_path=ledger, update=True).write(
+        _mapper_with_one_recurrence(), only={"recurrences"}
+    )
+    assert client.updated_recurrences[0][0] == "9"
+    assert report.counts["recurrence"]["updated"] == 1
+
+
 # ── New coverage tests ──────────────────────────────────────────────────────
 
 

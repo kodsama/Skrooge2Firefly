@@ -166,7 +166,9 @@ uv run skrooge-firefly --import Skrooge.sqlite --update
 `--update` PUTs the freshly-mapped version over each existing transaction
 (matched by `external_id`), creates any that are missing, and PATCHes accounts
 so their open/closed state matches Skrooge. The summary reports an `updated`
-count. (An existing budget is reused as-is; its monthly limits are not modified.)
+count. (An existing budget is reused as-is; `--update` syncs any newly-added
+monthly limits, and rewrites a recurring transaction whose managed fields have
+changed.)
 
 ## Resuming, and importing into a non-empty instance
 
