@@ -410,6 +410,7 @@ def test_update_skips_unchanged_recurrence(tmp_path: Path) -> None:
         "Rent": {
             "id": "9",
             "attributes": {
+                "type": "withdrawal",
                 "transactions": [
                     {
                         "amount": "800.000000",
@@ -419,14 +420,42 @@ def test_update_skips_unchanged_recurrence(tmp_path: Path) -> None:
                         "destination_name": "Landlord",
                     }
                 ],
-                "recurrence_repetitions": [{"type": "monthly", "moment": "5", "skip": 0}],
-                "transaction_type": {"type": "withdrawal"},
+                "repetitions": [{"type": "monthly", "moment": "5", "skip": 0}],
             },
         }
     }
     writer = FireflyApiWriter(client, ledger_path=tmp_path / "s.json", update=True)
     report = writer.write(_mapper_with_one_recurrence(), only={"recurrences"})
     assert client.updated_recurrences == [] and client.stored_recurrences == []
+    assert report.counts["recurrence"]["skipped"] == 1
+
+
+def test_update_skips_unchanged_recurrence_real_field_names(tmp_path: Path) -> None:
+    """Firefly's actual GET response uses top-level "type" and "repetitions" (not
+    "transaction_type"/"recurrence_repetitions"). An unchanged recurrence must still
+    be skipped, not re-PUT, when read from a response shaped like the real API."""
+    client = FakeClient()
+    client.existing_recurrence_content = {
+        "Rent": {
+            "id": "9",
+            "attributes": {
+                "type": "withdrawal",
+                "transactions": [
+                    {
+                        "amount": "800.000000",
+                        "currency_code": "SEK",
+                        "description": "Rent",
+                        "source_name": "Checking",
+                        "destination_name": "Landlord",
+                    }
+                ],
+                "repetitions": [{"type": "monthly", "moment": "5", "skip": 0}],
+            },
+        }
+    }
+    writer = FireflyApiWriter(client, ledger_path=tmp_path / "s.json", update=True)
+    report = writer.write(_mapper_with_one_recurrence(), only={"recurrences"})
+    assert client.updated_recurrences == []
     assert report.counts["recurrence"]["skipped"] == 1
 
 
@@ -437,6 +466,7 @@ def test_update_rewrites_changed_recurrence(tmp_path: Path) -> None:
         "Rent": {
             "id": "9",
             "attributes": {
+                "type": "withdrawal",
                 "transactions": [
                     {
                         "amount": "111.00",
@@ -446,8 +476,7 @@ def test_update_rewrites_changed_recurrence(tmp_path: Path) -> None:
                         "destination_name": "Landlord",
                     }
                 ],
-                "recurrence_repetitions": [{"type": "monthly", "moment": "5", "skip": 0}],
-                "transaction_type": {"type": "withdrawal"},
+                "repetitions": [{"type": "monthly", "moment": "5", "skip": 0}],
             },
         }
     }
@@ -481,6 +510,7 @@ def test_update_rewrites_changed_recurrence_even_when_ledger_has_it(tmp_path: Pa
         "Rent": {
             "id": "9",
             "attributes": {
+                "type": "withdrawal",
                 "transactions": [
                     {
                         "amount": "111.00",
@@ -490,8 +520,7 @@ def test_update_rewrites_changed_recurrence_even_when_ledger_has_it(tmp_path: Pa
                         "destination_name": "Landlord",
                     }
                 ],
-                "recurrence_repetitions": [{"type": "monthly", "moment": "5", "skip": 0}],
-                "transaction_type": {"type": "withdrawal"},
+                "repetitions": [{"type": "monthly", "moment": "5", "skip": 0}],
             },
         }
     }

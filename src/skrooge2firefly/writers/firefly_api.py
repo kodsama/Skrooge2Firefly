@@ -775,10 +775,10 @@ class FireflyApiWriter:
         from skrooge2firefly.writers.diffing import norm_amount, norm_str
 
         attrs = existing.get("attributes", {})
-        reps = attrs.get("recurrence_repetitions", [{}])
+        reps = attrs.get("repetitions") or [{}]
         rep = reps[0] if reps else {}
         etx = (attrs.get("transactions") or [{}])[0]
-        etype = (attrs.get("transaction_type") or {}).get("type", "")
+        etype = attrs.get("type", "")
         return (
             norm_str(rec.kind) != norm_str(etype)
             or norm_amount(_amount(rec.amount)) != norm_amount(etx.get("amount", "0"))
