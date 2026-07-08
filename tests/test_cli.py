@@ -69,6 +69,41 @@ def test_csv_target_end_to_end(skrooge_db: Path, populate, tmp_path: Path):
     assert (out / "transactions.csv").exists()
 
 
+def test_csv_dry_run_writes_no_files(skrooge_db: Path, populate, tmp_path: Path):
+    populate(skrooge_db, "unit", [{"id": 1, "t_name": "SEK", "t_symbol": "SEK", "t_type": "1"}])
+    populate(
+        skrooge_db,
+        "account",
+        [
+            {
+                "id": 1,
+                "t_name": "Checking",
+                "t_type": "C",
+                "f_importbalance": 0.0,
+                "d_importdate": "2010-01-01",
+            },
+        ],
+    )
+    populate(skrooge_db, "payee", [{"id": 5, "t_name": "ICA"}])
+    populate(
+        skrooge_db,
+        "operation",
+        [
+            {"id": 1, "d_date": "2020-05-01", "rd_account_id": 1, "r_payee_id": 5, "rc_unit_id": 1},
+        ],
+    )
+    populate(skrooge_db, "suboperation", [{"id": 1, "rd_operation_id": 1, "f_value": -10.0}])
+
+    out = tmp_path / "out"
+    code = main(
+        ["--target", "csv", "--dry-run", "--input", str(skrooge_db), "--output", str(out)],
+        default_input="Skrooge-2026-05-30.sqlite",
+        default_url="https://firefly.example.com",
+    )
+    assert code == 0
+    assert not out.exists()
+
+
 def test_api_target_without_token_errors(skrooge_db: Path, monkeypatch):
     monkeypatch.delenv("FIREFLY_TOKEN", raising=False)
     code = main(

@@ -48,6 +48,23 @@ def test_writes_csv_and_config(tmp_path: Path):
     assert report.counts["transaction"]["created"] == 2
 
 
+def test_csv_dry_run_writes_no_files(tmp_path: Path):
+    out = tmp_path / "out"
+    report = CsvImporterWriter(output_dir=out, dry_run=True).write(_mapper())
+    assert not out.exists()
+    assert not (out / "transactions.csv").exists()
+    assert not (out / "config.json").exists()
+    assert report.counts["transaction"]["created"] == 2
+
+
+def test_csv_non_dry_run_still_writes(tmp_path: Path):
+    out = tmp_path / "out"
+    report = CsvImporterWriter(output_dir=out, dry_run=False).write(_mapper())
+    assert (out / "transactions.csv").exists()
+    assert (out / "config.json").exists()
+    assert report.counts["transaction"]["created"] == 2
+
+
 def test_budgets_recurrences_reported_unsupported(tmp_path: Path):
     m = _mapper()
     from skrooge2firefly.model.entities import IRBudget

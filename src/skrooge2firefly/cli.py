@@ -266,7 +266,7 @@ def main(
 
         report = _run_writer(args, settings, mapper, only)
         logger.info("Done.\n%s", report.summary())
-        if args.dry_run and args.target == "api":
+        if args.dry_run:
             return _report_preflight(report, update=args.update)
         if report.has_failures and not args.dry_run:
             for kind, msg in report.errors[:20]:
@@ -363,7 +363,9 @@ def _run_writer(
     only: set[str] | None,
 ) -> WriteReport:
     if args.target == "csv":
-        return CsvImporterWriter(output_dir=args.output).write(mapper, only=only)
+        return CsvImporterWriter(output_dir=args.output, dry_run=args.dry_run).write(
+            mapper, only=only
+        )
 
     # API target — imported lazily so CSV runs need no network deps configured.
     from skrooge2firefly.writers.client import FireflyClient

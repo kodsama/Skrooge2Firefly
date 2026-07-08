@@ -53,23 +53,32 @@ def _signed(amount: Decimal, kind: str) -> str:
 class CsvImporterWriter:
     """Emits ``transactions.csv`` and ``config.json`` into an output directory."""
 
-    def __init__(self, *, output_dir: Path) -> None:
+    def __init__(self, *, output_dir: Path, dry_run: bool = False) -> None:
         """Create the writer.
 
         Args:
             output_dir: Directory to write ``transactions.csv`` and ``config.json``.
+            dry_run: When True, write nothing — only populate the report as a preview.
 
         """
         self._dir = output_dir
+        self._dry_run = dry_run
 
     def write(self, mapper: Mapper, *, only: set[str] | None = None) -> WriteReport:
-        """Write the CSV and config; report budgets/recurrences as unsupported."""
+        """Write the CSV and config; report budgets/recurrences as unsupported.
+
+        Under ``dry_run`` no directory is created and no files are written; the
+        report still reflects the transactions that would be created.
+        """
         report = WriteReport()
         sections = only or {"accounts", "transactions", "budgets", "recurrences"}
-        self._dir.mkdir(parents=True, exist_ok=True)
         if "transactions" in sections:
-            self._write_csv(mapper, report)
-            self._write_config()
+            if self._dry_run:
+                self._count_transactions(mapper, report)
+            else:
+                self._dir.mkdir(parents=True, exist_ok=True)
+                self._write_csv(mapper, report)
+                self._write_config()
         if "budgets" in sections and mapper.budgets:
             logger.warning(
                 "Budgets are not supported by the Data Importer; skipping %d.",
@@ -85,6 +94,10 @@ class CsvImporterWriter:
             for _ in mapper.recurrences:
                 report.skipped("recurrence")
         return report
+
+    def _count_transactions(self, mapper: Mapper, report: WriteReport) -> None:
+        for _ in mapper.transactions:
+            report.created("transaction")
 
     def _write_csv(self, mapper: Mapper, report: WriteReport) -> None:
         path = self._dir / "transactions.csv"
@@ -111,7 +124,7 @@ class CsvImporterWriter:
                             "external_id": txn.external_id,
                         }
                     )
-                report.created("transaction")
+        self._count_transactions(mapper, report)
 
     def _write_config(self) -> None:
         config = {
