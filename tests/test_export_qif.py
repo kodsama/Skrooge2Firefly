@@ -166,6 +166,31 @@ def test_withdrawal_into_own_liability_lands_in_both_blocks():
     assert inn.amount == Decimal("500") and inn.transfer_to == "Checking"
 
 
+def test_render_qif_respects_currency_decimal_places():
+    a = acct("Bahrain", currency="BHD")
+    txns = [
+        Transaction(
+            "b1", "withdrawal", "2020-09-01", [Split(Decimal("12.345"), "BHD", "Bahrain", "Souq")]
+        )
+    ]
+    entries = ledger_entries([a], txns)
+    text = render_qif([a], entries, {"BHD": 3})
+    assert "T-12.345" in text
+    assert "T-12.34\n" not in text
+
+
+def test_render_qif_defaults_to_two_decimals_for_unknown_currency():
+    a = acct("Bahrain", currency="BHD")
+    txns = [
+        Transaction(
+            "b1", "withdrawal", "2020-09-01", [Split(Decimal("12.345"), "BHD", "Bahrain", "Souq")]
+        )
+    ]
+    entries = ledger_entries([a], txns)
+    text = render_qif([a], entries)
+    assert "T-12.35" in text or "T-12.34" in text
+
+
 def test_deposit_from_own_liability_lands_in_both_blocks():
     accounts = [
         acct("Checking"),

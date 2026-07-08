@@ -37,7 +37,9 @@ def _pulled_data():
 
 def test_export_cli_qif_end_to_end(monkeypatch, tmp_path):
     monkeypatch.setenv("FIREFLY_TOKEN", "tok")
-    monkeypatch.setattr("skrooge2firefly.export_cli._connect_and_pull", lambda a, s: _pulled_data())
+    monkeypatch.setattr(
+        "skrooge2firefly.export_cli._connect_and_pull", lambda a, s: (_pulled_data(), {})
+    )
     out = tmp_path / "backup.qif"
     assert main(["--output", str(out)]) == 0
     assert "T-12.50" in out.read_text()
@@ -45,7 +47,9 @@ def test_export_cli_qif_end_to_end(monkeypatch, tmp_path):
 
 def test_export_cli_sqlite_end_to_end(monkeypatch, tmp_path, skrooge_template):
     monkeypatch.setenv("FIREFLY_TOKEN", "tok")
-    monkeypatch.setattr("skrooge2firefly.export_cli._connect_and_pull", lambda a, s: _pulled_data())
+    monkeypatch.setattr(
+        "skrooge2firefly.export_cli._connect_and_pull", lambda a, s: (_pulled_data(), {})
+    )
     out = tmp_path / "backup.sqlite"
     assert main(["--output", str(out), "--template", str(skrooge_template)]) == 0
     import sqlite3
@@ -61,6 +65,8 @@ def test_export_cli_missing_token_exits_2(monkeypatch, tmp_path):
 
 def test_export_cli_missing_template_exits_2(monkeypatch, tmp_path):
     monkeypatch.setenv("FIREFLY_TOKEN", "tok")
-    monkeypatch.setattr("skrooge2firefly.export_cli._connect_and_pull", lambda a, s: _pulled_data())
+    monkeypatch.setattr(
+        "skrooge2firefly.export_cli._connect_and_pull", lambda a, s: (_pulled_data(), {})
+    )
     out = tmp_path / "backup.sqlite"
     assert main(["--output", str(out), "--template", str(tmp_path / "nope.sqlite")]) == 2

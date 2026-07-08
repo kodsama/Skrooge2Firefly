@@ -85,12 +85,14 @@ def infer_format(output: Path, explicit: str | None) -> str:
     return "sqlite" if output.suffix.lower() in (".sqlite", ".skg") else "qif"
 
 
-def _connect_and_pull(args: argparse.Namespace, settings: Settings) -> PulledData:
+def _connect_and_pull(
+    args: argparse.Namespace, settings: Settings
+) -> tuple[PulledData, dict[str, int]]:
     from skrooge2firefly.writers.client import FireflyClient
 
     client = FireflyClient(settings.url, settings.require_token(), timeout=args.timeout)
     logger.info("Connected to Firefly %s", client.get_version())
-    return pull(client)
+    return pull(client), client.currency_decimals()
 
 
 def _report(parities: list[AccountParity]) -> bool:
@@ -126,7 +128,7 @@ def main(argv: list[str] | None = None) -> int:
             default_input=_DEFAULT_TEMPLATE,
         )
         fmt = infer_format(args.output, args.format)
-        data = _connect_and_pull(args, settings)
+        data, decimals = _connect_and_pull(args, settings)
         logger.info(
             "Pulled %d accounts, %d transactions, %d budgets",
             len(data.accounts),
@@ -134,18 +136,20 @@ def main(argv: list[str] | None = None) -> int:
             len(data.budgets),
         )
         if fmt == "qif":
-            text = render_qif(data.accounts, ledger_entries(data.accounts, data.transactions))
+            text = render_qif(
+                data.accounts, ledger_entries(data.accounts, data.transactions), decimals
+            )
             args.output.write_text(text, encoding="utf-8")
             if data.budgets:
                 logger.warning("QIF cannot represent budgets; %d skipped", len(data.budgets))
-            parities = verify_qif(text, data.accounts, data.transactions)
+            parities = verify_qif(text, data.accounts, data.transactions, decimals)
         else:
             template = args.template or Path(os.environ.get("SKROOGE_TEMPLATE") or settings.input)
             report = write_skg(template, args.output, data)
             for w in report.warnings:
                 logger.warning("%s", w)
             logger.info("Wrote %d operations, %d budget rows", report.operations, report.budgets)
-            parities = verify_skg(args.output, data.accounts, data.transactions)
+            parities = verify_skg(args.output, data.accounts, data.transactions, decimals)
         if not _report(parities):
             logger.error("Self-verification FAILED for %s", args.output)
             return 1
