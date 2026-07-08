@@ -163,10 +163,42 @@ the tool:
 uv run skrooge-firefly --import Skrooge.sqlite --update
 ```
 
-`--update` PUTs the freshly-mapped version over each existing transaction
-(matched by `external_id`), creates any that are missing, and PATCHes accounts
-so their open/closed state matches Skrooge. The summary reports an `updated`
-count. (An existing budget is reused as-is; its monthly limits are not modified.)
+`--update` is a change-detecting upsert across transactions, recurring
+transactions, budgets, and accounts: a record missing from Firefly is created,
+a record that differs from the Skrooge source is updated, and a record that
+already matches is left alone (skipped) — so a re-run only touches what
+actually changed. (A budget itself is reused as-is; `--update` syncs any
+newly-added monthly limits. A recurring transaction is rewritten only when a
+managed field has changed — its next-due date is left alone.)
+
+### Orphans: records Firefly has that the file no longer does
+
+`--update` also looks for the opposite case: a record Firefly has (tagged as
+ours) that is no longer present in the Skrooge file — typically something
+deleted in Skrooge since the last import. Only transactions and recurring
+transactions carry the ownership marker needed to detect this; budgets and
+accounts have none and are **never deleted** by this tool, no matter what
+`--orphans` says.
+
+```bash
+uv run skrooge-firefly --import Skrooge.sqlite --update --orphans report   # list only, no writes
+uv run skrooge-firefly --import Skrooge.sqlite --update --orphans delete   # delete every orphan found
+uv run skrooge-firefly --import Skrooge.sqlite --update --orphans ignore   # leave them all in place
+```
+
+Without `--orphans`, an interactive terminal prompts per orphan
+(`[d]elete` / `[i]gnore` / `[D]elete all` / `[I]gnore all` / `[q]uit`); a
+non-interactive run (cron, CI) defaults to `report` instead of guessing.
+
+For a repeatable, reviewable decision, pair `--dry-run` with `--decisions`:
+the dry run writes each orphan's choice to the file, and the real run applies
+it without prompting again (any orphan not covered by the file falls back to
+`--orphans`/the interactive prompt).
+
+```bash
+uv run skrooge-firefly --import Skrooge.sqlite --update --dry-run --decisions plan.json
+uv run skrooge-firefly --import Skrooge.sqlite --update --decisions plan.json
+```
 
 ## Resuming, and importing into a non-empty instance
 

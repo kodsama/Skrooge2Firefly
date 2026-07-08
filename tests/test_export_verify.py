@@ -84,6 +84,24 @@ def test_verify_skg_roundtrip_ok_and_detects_damage(skrooge_template, tmp_path):
     assert not all(p.ok for p in verify_skg(out, [a1, a2], txns))
 
 
+def test_verify_qif_roundtrip_respects_currency_decimals():
+    """A 3-decimal currency (BHD) must not be truncated to 2dp on export, and
+    the self-check must compare at the same (real) precision on both sides."""
+    a = acct("Bahrain", "BHD")
+    txns = [
+        Transaction(
+            "b1", "withdrawal", "2020-09-01", [Split(Decimal("12.345"), "BHD", "Bahrain", "Souq")]
+        )
+    ]
+    decimals = {"BHD": 3}
+    text = render_qif([a], ledger_entries([a], txns), decimals)
+    assert "T-12.345" in text
+    parities = {p.name: p for p in verify_qif(text, [a], txns, decimals)}
+    assert parities["Bahrain"].ok
+    assert parities["Bahrain"].expected_sum == Decimal("-12.345")
+    assert parities["Bahrain"].actual_sum == Decimal("-12.345")
+
+
 def test_verify_qif_counts_liability_side_of_withdrawal():
     a1 = acct("Checking")
     a2 = acct("Mortgage", kind="liability", role=None, liability_type="loan")

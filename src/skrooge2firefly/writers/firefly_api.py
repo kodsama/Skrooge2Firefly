@@ -4,16 +4,23 @@ from __future__ import annotations
 
 import calendar
 import logging
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
-from skrooge2firefly.model.entities import Account, Split, Transaction
+from skrooge2firefly.model.entities import Account, IRBudget, Recurrence, Split, Transaction
 from skrooge2firefly.model.mapper import Mapper
+from skrooge2firefly.writers import decisions
 from skrooge2firefly.writers.base import WriteReport
 from skrooge2firefly.writers.client import DuplicateTransactionError, FireflyClient, FireflyError
+from skrooge2firefly.writers.orphans import FixedDecider, MappingDecider, OrphanDecider
+
+# Marker written into a recurrence's notes when Skrooge2Firefly created it;
+# only recurrences carrying it are ever eligible for orphan deletion.
+_RECURRENCE_MARKER = "Imported from Skrooge recurring operation."
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +133,12 @@ class _Ledger:
             with self._path.open("a") as f:
                 f.write(external_id + "\n")
 
+    def discard(self, external_id: str) -> None:
+        """Forget *external_id* (rewrites the ledger file from the in-memory set)."""
+        if external_id in self._seen:
+            self._seen.discard(external_id)
+            self._path.write_text("".join(f"{e}\n" for e in sorted(self._seen)))
+
 
 class FireflyApiWriter:
     """Creates currencies, accounts, transactions, budgets, and recurring transactions."""
@@ -140,6 +153,9 @@ class FireflyApiWriter:
         assume_empty: bool = False,
         concurrency: int = 1,
         update: bool = False,
+        orphan_decider: OrphanDecider | None = None,
+        decisions_path: Path | None = None,
+        resolve_orphans: bool = True,
     ) -> None:
         """Create the writer.
 
@@ -151,6 +167,16 @@ class FireflyApiWriter:
             assume_empty: When True, skip reconciliation reads (target known fresh).
             concurrency: Number of parallel transaction POSTs (1 = sequential).
             update: When True, re-sync existing transactions and mirror account active state.
+            orphan_decider: Decides whether to delete records present on the server but
+                absent from the newer file. Defaults to always ignoring orphans.
+            decisions_path: Path to the orphan-decisions plan file. When it exists, its
+                decisions are applied without prompting (falling back to
+                ``orphan_decider`` for keys it doesn't cover). On a dry run, the
+                decisions made this run are written back to this path.
+            resolve_orphans: When False, skip orphan resolution entirely. Must be False
+                whenever the mapper's transactions were narrowed by a date filter, since
+                orphan detection can't tell "deleted in Skrooge" from "outside the
+                window" and would otherwise delete in-range server history.
 
         """
         self._client = client
@@ -160,16 +186,30 @@ class FireflyApiWriter:
         self._assume_empty = assume_empty
         self._concurrency = concurrency
         self._update = update
+        self._decisions_path = decisions_path
+        self._resolve_orphans_enabled = resolve_orphans
+        self._orphan_choices: dict[str, str] = {}
+        base_decider = orphan_decider or FixedDecider("ignore")
+        if decisions_path is not None and decisions_path.exists():
+            self._orphan_decider: OrphanDecider = MappingDecider(
+                decisions.load(decisions_path), fallback=base_decider
+            )
+        else:
+            self._orphan_decider = base_decider
         self._existing_group_ids: dict[str, str] = {}
         self._account_states: dict[str, tuple[str, bool]] = {}
         self._account_ids: dict[str, str] = {}
         self._account_index: dict[str, str] = {}
         self._budget_index: dict[str, str] = {}
         self._existing_txn_ids: set[str] = set()
+        self._existing_txn_content: dict[str, dict[str, Any]] = {}
         self._recurrence_index: dict[str, str] = {}
+        self._existing_recurrences: dict[str, dict[str, Any]] = {}
+        self._existing_budget_limits: dict[str, dict[tuple[str, str], dict[str, Any]]] = {}
         self._consecutive_failures = 0
         self._account_active: dict[str, bool] = {}  # live remote active-state by name
         self._currency_decimals: dict[str, int] = {}
+        self._existing_account_attrs: dict[str, dict[str, Any]] = {}
 
     def _fmt(self, value: Decimal, currency: str) -> str:
         """Format an amount at its currency's decimal places (default 2)."""
@@ -213,6 +253,8 @@ class FireflyApiWriter:
             self._write_budgets(mapper, report)
         if "recurrences" in sections:
             self._write_recurrences(mapper, report)
+        if self._update:
+            self._resolve_orphans(mapper, sections, report)
         if not self._dry_run:
             self._restore_account_states(mapper)
         return report
@@ -246,6 +288,8 @@ class FireflyApiWriter:
 
     def _reconcile(self) -> None:
         """Fetch existing state from Firefly so we reuse/skip instead of duplicating."""
+        from skrooge2firefly.writers.diffing import norm_amount
+
         self._account_index = self._client.account_index()
         self._budget_index = self._client.budget_index()
         self._existing_txn_ids = self._client.existing_external_ids()
@@ -256,7 +300,23 @@ class FireflyApiWriter:
         for name, (account_id, _) in self._account_states.items():
             self._account_ids.setdefault(name, account_id)
         if self._update:
+            self._existing_account_attrs = {
+                **self._client.accounts_full("asset"),
+                **self._client.accounts_full("liability"),
+            }
             self._existing_group_ids = self._client.external_id_to_group_id()
+            self._existing_txn_content = self._client.transactions_by_external_id()
+            self._existing_recurrences = self._client.recurrences_full()
+            self._existing_budget_limits = {
+                name: {
+                    (item["attributes"]["start"], item["attributes"]["end"]): {
+                        "id": str(item["id"]),
+                        "amount": norm_amount(item["attributes"]["amount"]),
+                    }
+                    for item in limits
+                }
+                for name, limits in self._client.list_budgets_with_limits()
+            }
         logger.info(
             "Reconciled target: %d accounts, %d budgets, %d skrooge transactions, %d recurrences",
             len(self._account_index),
@@ -286,23 +346,62 @@ class FireflyApiWriter:
             report.created("currency")
 
     def _write_accounts(self, mapper: Mapper, report: WriteReport) -> None:
+        from skrooge2firefly.writers.diffing import norm_amount, norm_str
+
+        managed_keys = (
+            "currency_code",
+            "notes",
+            "account_role",
+            "liability_type",
+            "liability_direction",
+        )
+
+        def _opening_balance_key(value: Any) -> Decimal | None:
+            if value is None or value == "":
+                return None
+            return norm_amount(value)
+
         for acct in mapper.accounts:
             if self._update and acct.name in self._account_states:
                 account_id, current_active = self._account_states[acct.name]
                 self._account_ids[acct.name] = account_id
                 self._ledger.record(acct.external_id)
-                if current_active != acct.active and not self._dry_run:
+                # _account_payload hardcodes active=True (needed so freshly
+                # created accounts can immediately book transactions); an
+                # already-existing account being patched here isn't going
+                # through that create flow, so send its real desired state.
+                payload = self._account_payload(acct)
+                payload["active"] = acct.active
+                existing_attrs = self._existing_account_attrs.get(acct.name, {}).get(
+                    "attributes", {}
+                )
+                # Only resend the opening balance when it actually changed:
+                # otherwise an unrelated field update (e.g. notes) would
+                # re-apply it and silently revert a manual Firefly correction.
+                opening_balance_changed = _opening_balance_key(
+                    acct.opening_balance
+                ) != _opening_balance_key(existing_attrs.get("opening_balance"))
+                if not opening_balance_changed:
+                    payload.pop("opening_balance", None)
+                    payload.pop("opening_balance_date", None)
+                fields_differ = any(
+                    norm_str(payload.get(k)) != norm_str(existing_attrs.get(k))
+                    for k in managed_keys
+                )
+                needs_update = (
+                    current_active != acct.active or fields_differ or opening_balance_changed
+                )
+                if needs_update and not self._dry_run:
                     try:
-                        self._client.update_account(
-                            account_id, {"name": acct.name, "active": acct.active}
-                        )
-                        logger.info("Account %s active -> %s", acct.name, acct.active)
+                        self._client.update_account(account_id, payload)
+                        self._account_active[acct.name] = acct.active
+                        logger.info("Account %s updated", acct.name)
                         report.updated("account")
                     except Exception as exc:  # noqa: BLE001
                         report.failed("account", f"{acct.name}: {exc}")
                         if self._strict:
                             raise
-                elif current_active != acct.active:
+                elif needs_update:
                     report.updated("account")  # dry-run: would update
                 else:
                     report.skipped("account")
@@ -450,6 +549,11 @@ class FireflyApiWriter:
                 else:
                     self._post_one_transaction(txn, report)
                 continue
+            existing = self._existing_txn_content.get(txn.external_id, {})
+            if not self._txn_changed(txn, existing):
+                self._ledger.record(txn.external_id)
+                report.skipped("transaction")
+                continue
             if self._dry_run:
                 report.updated("transaction")
                 continue
@@ -463,6 +567,39 @@ class FireflyApiWriter:
                 if self._strict:
                     raise
                 self._note_transaction_failure()
+
+    def _txn_changed(self, txn: Transaction, existing: dict[str, Any]) -> bool:
+        """Return True if any managed field differs from the transaction on the server.
+
+        Splits are compared as an unordered multiset (a reordered multi-split
+        transaction is not a change) and every field we manage — including
+        foreign amount/currency and tags — is included. Fields we don't manage
+        (reconciled, order, external_id) stay excluded.
+        """
+        from skrooge2firefly.writers.diffing import norm_amount, norm_date, norm_str
+
+        def _split_key(split: dict[str, Any]) -> tuple[Any, ...]:
+            foreign_amount = split.get("foreign_amount")
+            foreign_key = norm_amount(foreign_amount) if foreign_amount is not None else None
+            return (
+                norm_str(split.get("type")),
+                norm_date(str(split.get("date"))),
+                norm_amount(split.get("amount", "0")),
+                norm_str(split.get("currency_code")),
+                norm_str(split.get("description")),
+                norm_str(split.get("source_name")),
+                norm_str(split.get("destination_name")),
+                norm_str(split.get("category_name")),
+                foreign_key,
+                norm_str(split.get("foreign_currency_code")),
+                frozenset(split.get("tags") or []),
+            )
+
+        desired = self._update_payload(txn)["transactions"]
+        current = existing.get("splits", [])
+        if len(desired) != len(current):
+            return True
+        return Counter(_split_key(d) for d in desired) != Counter(_split_key(c) for c in current)
 
     def _update_payload(self, txn: Transaction) -> dict[str, Any]:
         splits = [self._split_payload(txn, s, i) for i, s in enumerate(txn.splits)]
@@ -531,12 +668,15 @@ class FireflyApiWriter:
     def _write_budgets(self, mapper: Mapper, report: WriteReport) -> None:
         for budget in mapper.budgets:
             ext = f"skrooge:budget:{budget.name}"
-            if self._ledger.has(ext):
+            if self._ledger.has(ext) and not self._update:
                 report.skipped("budget")
                 continue
             if budget.name in self._budget_index:
                 self._ledger.record(ext)
-                report.skipped("budget")
+                if self._update:
+                    self._sync_budget_limits(budget, report)
+                else:
+                    report.skipped("budget")
                 continue
             if self._dry_run:
                 report.created("budget")  # pre-flight: would be created
@@ -556,44 +696,82 @@ class FireflyApiWriter:
                 if self._strict:
                     raise
 
+    def _sync_budget_limits(self, budget: IRBudget, report: WriteReport) -> None:
+        """Create missing limits and update changed-amount limits in place.
+
+        A limit is keyed by its (start, end) period. A period absent on the
+        server is created; a period present with a different amount is
+        updated via PUT (never re-POSTed, which would leave two limits for
+        the same period); a period with the same amount is left alone.
+        """
+        from skrooge2firefly.writers.diffing import norm_amount
+
+        existing = self._existing_budget_limits.get(budget.name, {})
+        to_create = []
+        to_update = []
+        for limit in budget.limits:
+            period = (limit.start, limit.end)
+            current = existing.get(period)
+            if current is None:
+                to_create.append(limit)
+            elif current["amount"] != norm_amount(_amount(limit.amount)):
+                to_update.append((limit, current["id"]))
+        if not to_create and not to_update:
+            report.skipped("budget")
+            return
+        if self._dry_run:
+            report.updated("budget")  # pre-flight: would be created/updated
+            return
+        budget_id = self._budget_index[budget.name]
+        try:
+            for limit in to_create:
+                self._client.store_budget_limit(
+                    budget_id,
+                    {"start": limit.start, "end": limit.end, "amount": _amount(limit.amount)},
+                )
+            for limit, limit_id in to_update:
+                self._client.update_budget_limit(
+                    budget_id,
+                    limit_id,
+                    {"start": limit.start, "end": limit.end, "amount": _amount(limit.amount)},
+                )
+            report.updated("budget")
+        except Exception as exc:  # noqa: BLE001
+            report.failed("budget", f"{budget.name}: {exc}")
+            if self._strict:
+                raise
+
     def _write_recurrences(self, mapper: Mapper, report: WriteReport) -> None:
-        today = date.today()
         for rec in mapper.recurrences:
-            if self._ledger.has(rec.external_id) or rec.title in self._recurrence_index:
+            if self._ledger.has(rec.external_id) and not self._update:
+                report.skipped("recurrence")
+                continue
+            existing = self._existing_recurrences.get(rec.title) if self._update else None
+            if rec.title in self._recurrence_index or existing is not None:
+                if (
+                    self._update
+                    and existing is not None
+                    and self._recurrence_changed(rec, existing)
+                ):
+                    if self._dry_run:
+                        report.updated("recurrence")  # pre-flight: would be updated
+                        continue
+                    try:
+                        self._client.update_recurrence(
+                            existing["id"], self._recurrence_payload(rec)
+                        )
+                        report.updated("recurrence")
+                    except Exception as exc:  # noqa: BLE001
+                        report.failed("recurrence", f"{rec.title}: {exc}")
+                        if self._strict:
+                            raise
+                    continue
                 report.skipped("recurrence")
                 continue
             if self._dry_run:
                 report.created("recurrence")  # pre-flight: would be created
                 continue
-            increment = rec.skip + 1
-            payload = {
-                "type": rec.kind,
-                "title": rec.title,
-                "description": rec.description,
-                "first_date": _next_first_date(
-                    rec.first_date, rec.repetition_type, increment, today
-                ),
-                "apply_rules": False,
-                "active": True,
-                "notes": "Imported from Skrooge recurring operation.",
-                "repetitions": [
-                    {
-                        "type": rec.repetition_type,
-                        "moment": _moment(rec.first_date, rec.repetition_type),
-                        "skip": rec.skip,
-                    }
-                ],
-            }
-            txn: dict[str, Any] = {
-                "description": rec.description,
-                "amount": _amount(rec.amount),
-                "currency_code": rec.currency_code,
-                "source_name": rec.source_name,
-                "destination_name": rec.destination_name,
-            }
-            if rec.category_name:
-                txn["category_name"] = rec.category_name
-            payload["transactions"] = [txn]
+            payload = self._recurrence_payload(rec)
             try:
                 rid = self._client.store_recurrence(payload)
                 self._recurrence_index[rec.title] = rid
@@ -603,3 +781,120 @@ class FireflyApiWriter:
                 report.failed("recurrence", f"{rec.title}: {exc}")
                 if self._strict:
                     raise
+
+    def _recurrence_payload(self, rec: Recurrence) -> dict[str, Any]:
+        today = date.today()
+        increment = rec.skip + 1
+        payload: dict[str, Any] = {
+            "type": rec.kind,
+            "title": rec.title,
+            "description": rec.description,
+            "first_date": _next_first_date(rec.first_date, rec.repetition_type, increment, today),
+            "apply_rules": False,
+            "active": True,
+            "notes": _RECURRENCE_MARKER,
+            "repetitions": [
+                {
+                    "type": rec.repetition_type,
+                    "moment": _moment(rec.first_date, rec.repetition_type),
+                    "skip": rec.skip,
+                }
+            ],
+        }
+        txn: dict[str, Any] = {
+            "description": rec.description,
+            "amount": _amount(rec.amount),
+            "currency_code": rec.currency_code,
+            "source_name": rec.source_name,
+            "destination_name": rec.destination_name,
+        }
+        if rec.category_name:
+            txn["category_name"] = rec.category_name
+        payload["transactions"] = [txn]
+        return payload
+
+    def _recurrence_changed(self, rec: Recurrence, existing: dict[str, Any]) -> bool:
+        """Return True if any managed field differs (excludes first_date and description)."""
+        from skrooge2firefly.writers.diffing import norm_amount, norm_str
+
+        attrs = existing.get("attributes", {})
+        reps = attrs.get("repetitions") or [{}]
+        rep = reps[0] if reps else {}
+        etx = (attrs.get("transactions") or [{}])[0]
+        etype = attrs.get("type", "")
+        return (
+            norm_str(rec.kind) != norm_str(etype)
+            or norm_amount(_amount(rec.amount)) != norm_amount(etx.get("amount", "0"))
+            or norm_str(rec.currency_code) != norm_str(etx.get("currency_code"))
+            or norm_str(rec.source_name) != norm_str(etx.get("source_name"))
+            or norm_str(rec.destination_name) != norm_str(etx.get("destination_name"))
+            or norm_str(rec.repetition_type) != norm_str(rep.get("type"))
+            or norm_str(_moment(rec.first_date, rec.repetition_type)) != norm_str(rep.get("moment"))
+            or int(rec.skip) != int(rep.get("skip", 0) or 0)
+        )
+
+    def _resolve_orphans(self, mapper: Mapper, sections: set[str], report: WriteReport) -> None:
+        """Delete or ignore records present on the server but missing from the file.
+
+        Only transactions (via ``skrooge:`` external_id) and recurrences (via the
+        Skrooge notes marker) carry an ownership marker; budgets and accounts have
+        none and are never candidates for deletion here.
+        """
+        if not self._resolve_orphans_enabled:
+            logger.info(
+                "Orphan resolution skipped because a --since/--until date filter is "
+                "active (would misread out-of-window records as orphans)."
+            )
+            return
+        if "transactions" in sections:
+            self._resolve_orphan_transactions(mapper, report)
+        if "recurrences" in sections:
+            self._resolve_orphan_recurrences(mapper, report)
+        if self._decisions_path is not None and self._dry_run:
+            merged = decisions.load(self._decisions_path)  # preserve prior partial-run choices
+            merged.update(self._orphan_choices)  # this run's choices win on conflict
+            decisions.save(self._decisions_path, merged)
+
+    def _resolve_orphan_transactions(self, mapper: Mapper, report: WriteReport) -> None:
+        mapped_ids = {t.external_id for t in mapper.transactions}
+        orphan_keys = set(self._existing_group_ids) - mapped_ids
+        for key in orphan_keys:
+            group_id = self._existing_group_ids[key]
+            content = self._existing_txn_content.get(key)
+            splits = content.get("splits") if content else None
+            if splits:
+                split = splits[0]
+                label = f"{split.get('description', '')} {split.get('amount', '')}".strip()
+            else:
+                label = key
+            action = self._orphan_decider.decide("transaction", key, label)
+            self._orphan_choices[key] = action
+            if action == "delete":
+                report.deleted("orphan-transaction")
+                if not self._dry_run:
+                    self._client.delete_transaction(group_id)
+                    self._ledger.discard(key)
+            else:
+                report.skipped("orphan-transaction")
+
+    def _resolve_orphan_recurrences(self, mapper: Mapper, report: WriteReport) -> None:
+        mapped_titles = {r.title for r in mapper.recurrences}
+        candidates = {
+            title
+            for title, rec in self._existing_recurrences.items()
+            if _RECURRENCE_MARKER in rec.get("attributes", {}).get("notes", "")
+        }
+        for title in candidates - mapped_titles:
+            recurrence_id = self._existing_recurrences[title]["id"]
+            key = f"rec:{title}"
+            action = self._orphan_decider.decide("recurrence", key, title)
+            self._orphan_choices[key] = action
+            if action == "delete":
+                report.deleted("orphan-recurrence")
+                if not self._dry_run:
+                    self._client.delete_recurrence(recurrence_id)
+                    # No ledger discard here: recurrences are keyed by title, not
+                    # Skrooge external_id, and the deleted record's external_id
+                    # isn't available at this point (it's absent from the mapper).
+            else:
+                report.skipped("orphan-recurrence")

@@ -2,8 +2,10 @@ import sqlite3
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 from skrooge2firefly.export.puller import PulledData
-from skrooge2firefly.export.skg import write_skg
+from skrooge2firefly.export.skg import SkgExportError, _insert_one_operation, write_skg
 from skrooge2firefly.model.entities import Account, Split, Transaction
 
 
@@ -213,3 +215,47 @@ def test_write_skg_withdrawal_into_own_liability_pairs_operations(skrooge_templa
     ).fetchall()
     assert [(r[0], r[1]) for r in rows] == [("Checking", -500.0), ("Mortgage", 500.0)]
     assert rows[0][2] == rows[1][2] > 0  # paired as a Skrooge transfer
+
+
+def test_export_account_with_blank_currency_uses_default_not_arbitrary(skrooge_template, tmp_path):
+    """A blank-currency account must get the deterministic default, not an arbitrary unit.
+
+    The template pre-seeds SEK (id 1) before EUR (id 2), so the old
+    ``next(iter(unit_map.values()))`` fallback would pick SEK by dict-iteration
+    luck even though no account actually uses SEK. The fix must instead resolve
+    to EUR, the only real account currency in this dataset.
+    """
+    out = tmp_path / "blank.sqlite"
+    checking = _acct("Checking", currency_code="EUR")
+    wallet = _acct("Wallet", currency_code="")
+    txns = [
+        Transaction(
+            "t1", "withdrawal", "2020-01-01", [Split(Decimal("10"), "EUR", "Checking", "ICA")]
+        ),
+        Transaction(
+            "t2", "withdrawal", "2020-01-02", [Split(Decimal("5"), "EUR", "Wallet", "Kiosk")]
+        ),
+    ]
+    write_skg(skrooge_template, out, _data([checking, wallet], txns))
+    conn = sqlite3.connect(str(out))
+    unit_by_account = dict(
+        conn.execute(
+            "SELECT a.t_name, o.rc_unit_id FROM operation o JOIN account a ON a.id=o.rd_account_id"
+        )
+    )
+    eur_unit_id = conn.execute("SELECT id FROM unit WHERE t_symbol='€'").fetchone()[0]
+    sek_unit_id = conn.execute("SELECT id FROM unit WHERE t_symbol='SEK'").fetchone()[0]
+    assert unit_by_account["Wallet"] == eur_unit_id
+    assert unit_by_account["Wallet"] != sek_unit_id
+
+
+def test_export_no_currencies_raises_clean_error(skrooge_template):
+    """When no currency can be resolved, raise a clear error, not ``StopIteration``."""
+    conn = sqlite3.connect(str(skrooge_template))
+    txn = Transaction(
+        "t", "withdrawal", "2020-01-01", [Split(Decimal("1"), "EUR", "Wallet", "Kiosk")]
+    )
+    account = _acct("Wallet", currency_code="")
+    with pytest.raises(SkgExportError):
+        _insert_one_operation(conn, txn, account, -1, 0, 0, {}, {"Wallet": 1}, {}, {}, "")
+    conn.close()

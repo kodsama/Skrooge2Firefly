@@ -55,13 +55,17 @@ _ACCOUNT_TYPE_MAP: dict[str, tuple[str, str | None, str | None]] = {
 def _fold_invalid_date_operations(
     operations: list[sk.Operation], subs: dict[int, list[sk.Suboperation]]
 ) -> tuple[dict[int, Decimal], dict[int, int]]:
-    """Sum non-transfer, invalid-dated operations per account.
+    """Sum invalid-dated operations per account, including transfer legs.
 
     Skrooge encodes an account's opening balance as an operation dated
     ``0000-00-00`` when ``f_importbalance`` is empty; its own balance views
-    have no date filter and count these unconditionally. Transfer-group
-    operations (``group_id != 0``) are excluded here — they're handled by
-    ``_map_transfers``, which already has its own invalid-date handling.
+    have no date filter and count these unconditionally, regardless of
+    whether the operation is a transfer leg (``group_id != 0``) or not.
+    Each leg is folded into its own account's total independently, so an
+    invalid-date transfer between two accounts still contributes to both
+    accounts' opening balances. ``_map_operations``/``_map_transfers`` then
+    exclude these same operations from ever becoming a transaction, so
+    nothing is double-counted.
 
     Returns:
         (totals, counts): per-account-id summed value and operation count.
@@ -70,7 +74,7 @@ def _fold_invalid_date_operations(
     totals: dict[int, Decimal] = defaultdict(Decimal)
     counts: dict[int, int] = defaultdict(int)
     for op in operations:
-        if op.template or op.group_id != 0 or _has_valid_date(op.date):
+        if op.template or _has_valid_date(op.date):
             continue
         for sub in subs.get(op.id, []):
             totals[op.account_id] += Decimal(str(sub.value))
@@ -172,6 +176,17 @@ class Mapper:
                     primary=unit.is_primary,
                 )
             )
+        # code -> decimal places, for quantizing FX-converted and sub-cent-filtered
+        # amounts to each currency's own precision (2dp default when unknown).
+        self._currency_decimals = {c.code: c.decimal_places for c in self.currencies}
+
+    def _decimal_places(self, currency_code: str) -> int:
+        dp = self._currency_decimals.get(currency_code)
+        return 2 if dp is None else dp
+
+    def _subcent_threshold(self, currency_code: str) -> Decimal:
+        """Half of the currency's smallest unit (0.005 for 2dp, 0.5 for 0dp, ...)."""
+        return Decimal(1).scaleb(-self._decimal_places(currency_code)) / 2
 
     def _infer_account_currencies(
         self, operations: list[sk.Operation], units: dict[int, sk.Unit]
@@ -214,12 +229,14 @@ class Mapper:
         if op.unit_id == dominant_unit_id or dominant_unit is None or ctx.primary_unit_id is None:
             return amount, op_currency, None, None
         converted = convert_amount(
-            float(amount), op.unit_id, dominant_unit_id, ctx.primary_unit_id, ctx.rates, op.date
+            amount, op.unit_id, dominant_unit_id, ctx.primary_unit_id, ctx.rates, op.date
         )
         if converted is None:
             return amount, op_currency, None, None  # no rate: keep face value
         dom_currency = iso_code(dominant_unit.symbol, dominant_unit.name)
-        return Decimal(str(round(converted, 2))), dom_currency, amount, op_currency
+        quantum = Decimal(1).scaleb(-self._decimal_places(dom_currency))
+        booked = converted.quantize(quantum)
+        return booked, dom_currency, amount, op_currency
 
     def _map_accounts(
         self,
@@ -269,14 +286,12 @@ class Mapper:
     def _map_operations(self, operations: list[sk.Operation]) -> None:
         # Template operations are recurrence blueprints, not real transactions;
         # they are consumed by _map_recurrences, never imported as transactions.
-        # Non-transfer invalid-date operations were already folded into their
-        # account's opening balance by _fold_invalid_date_operations; transfer
-        # legs (group_id != 0) keep their own invalid-date handling below.
-        real_ops = [
-            op
-            for op in operations
-            if not op.template and (op.group_id != 0 or _has_valid_date(op.date))
-        ]
+        # Invalid-date operations — including transfer legs — were already
+        # folded into their account's opening balance by
+        # _fold_invalid_date_operations, so they're excluded here too (a
+        # transfer group left with only one valid-dated leg after this falls
+        # back to a normal transaction in _map_transfers).
+        real_ops = [op for op in operations if not op.template and _has_valid_date(op.date)]
         ctx = self._ctx  # type: ignore[attr-defined]
         transfers: dict[int, list[sk.Operation]] = {}
         for op in real_ops:
@@ -306,7 +321,12 @@ class Mapper:
         if not subs:
             self.warnings.append(f"Operation {op.id} has no suboperations; skipped.")
             return
-        account = ctx.accounts[op.account_id]
+        account = ctx.accounts.get(op.account_id)
+        if account is None:
+            self.warnings.append(
+                f"Operation {op.id} references unknown account {op.account_id}; skipped."
+            )
+            return
         payee = ctx.payees.get(op.payee_id, "")
 
         negatives = [s for s in subs if s.value < 0]
@@ -331,15 +351,18 @@ class Mapper:
         suffix: str,
     ) -> None:
         splits = [self._make_split(op, account, payee, sub, kind, ctx) for sub in subs]
-        # Firefly renders amounts at 2 decimals and rejects 0.00, so sub-cent
-        # splits (Skrooge float artifacts like 1e-07 "fake operations") must go.
-        subcent = [s for s in splits if s.amount < Decimal("0.005")]
+        # Firefly rejects a 0-valued amount, so sub-cent splits (Skrooge float
+        # artifacts like 1e-07 "fake operations") must go. The threshold is half
+        # of the split's own currency's smallest unit (0.005 for 2dp, 0.5 for
+        # 0dp currencies like JPY, etc.) so real small amounts in high-precision
+        # currencies aren't mistaken for float noise.
+        subcent = [s for s in splits if s.amount < self._subcent_threshold(s.currency_code)]
         if subcent:
-            self.warnings.append(
-                f"Operation {op.id}: dropped {len(subcent)} sub-cent split(s) (round to 0.00)."
-            )
-            splits = [s for s in splits if s.amount >= Decimal("0.005")]
-        if not splits or sum((s.amount for s in splits), Decimal(0)) < Decimal("0.005"):
+            self.warnings.append(f"Operation {op.id}: dropped {len(subcent)} sub-cent split(s).")
+            splits = [s for s in splits if s.amount >= self._subcent_threshold(s.currency_code)]
+        if not splits or sum((s.amount for s in splits), Decimal(0)) < self._subcent_threshold(
+            splits[0].currency_code
+        ):
             return  # zero-value group; Firefly rejects amount-0 transactions
         group_title = op.comment if len(splits) > 1 else None
         self.transactions.append(
@@ -445,13 +468,23 @@ class Mapper:
             fallback = self._primary_currency  # type: ignore[attr-defined]
             src_currency = iso_code(src_unit.symbol, src_unit.name) if src_unit else fallback
             dst_currency = iso_code(dst_unit.symbol, dst_unit.name) if dst_unit else fallback
-            source_account = ctx.accounts[source_op.account_id]
-            dest_account = ctx.accounts[dest_op.account_id]
-
-            if not _has_valid_date(source_op.date) or abs(source_total) == 0:
+            source_account = ctx.accounts.get(source_op.account_id)
+            dest_account = ctx.accounts.get(dest_op.account_id)
+            if source_account is None or dest_account is None:
+                missing = source_op.account_id if source_account is None else dest_op.account_id
                 self.warnings.append(
-                    f"Transfer group {group_id} has an invalid date or zero amount; skipping."
+                    f"Transfer group {group_id} references unknown account {missing}; "
+                    f"emitting each leg as a normal transaction."
                 )
+                for op in ops:
+                    self._emit_operation(op, ctx)
+                continue
+
+            # Both legs already have a valid date here — invalid-date legs were
+            # excluded from real_ops and folded into opening balance above —
+            # so only the zero-amount case remains.
+            if abs(source_total) == 0:
+                self.warnings.append(f"Transfer group {group_id} has a zero amount; skipping.")
                 continue
 
             # Firefly transfers demand currency_code == source-account currency and
@@ -560,7 +593,13 @@ class Mapper:
             )
             return
 
-        cash_account = ctx.accounts[cash_op.account_id]
+        cash_account = ctx.accounts.get(cash_op.account_id)
+        if cash_account is None:
+            self.warnings.append(
+                f"Securities group {group_id}: operation {cash_op.id} references "
+                f"unknown account {cash_op.account_id}; skipped."
+            )
+            return
         # Book in the account's own currency (foreign-currency cash legs — e.g.
         # NOK stock buys in a SEK account — are FX-converted, original kept).
         amount, currency, foreign_amount, foreign_currency = self._book_amount(
@@ -632,7 +671,12 @@ class Mapper:
             if unit is not None and not unit.is_currency:
                 continue
             currency = iso_code(unit.symbol, unit.name) if unit else self._primary_currency  # type: ignore[attr-defined]
-            account = ctx.accounts[op.account_id]
+            account = ctx.accounts.get(op.account_id)
+            if account is None:
+                self.warnings.append(
+                    f"Recurrence {rec.id} references unknown account {op.account_id}; skipped."
+                )
+                continue
             payee = ctx.payees.get(op.payee_id, "(unknown)")
             source, destination = (
                 (account.name, payee) if kind == "withdrawal" else (payee, account.name)

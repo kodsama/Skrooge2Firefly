@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from skrooge2firefly.config import ConfigError, Settings
+from skrooge2firefly.config import load_dotenv as real_load_dotenv
 
 
 def _resolve(**kwargs):
@@ -48,3 +49,23 @@ def test_missing_token_for_api_raises(monkeypatch):
     monkeypatch.delenv("FIREFLY_TOKEN", raising=False)
     with pytest.raises(ConfigError):
         _resolve().require_token()
+
+
+def test_env_file_found_from_working_directory(monkeypatch, tmp_path):
+    """A .env in the cwd must be found even though config.py lives elsewhere.
+
+    ``load_dotenv()`` with no argument searches upward from the *calling
+    source file*, which resolves into site-packages for an installed CLI.
+    ``resolve`` must instead search from the process's working directory.
+    """
+    monkeypatch.delenv("FIREFLY_TOKEN", raising=False)
+    monkeypatch.delenv("FIREFLY_URL", raising=False)
+    monkeypatch.delenv("SKROOGE_FILE", raising=False)
+    # Restore the real load_dotenv; conftest's autouse fixture stubs it out
+    # for hermeticity in other tests.
+    monkeypatch.setattr("skrooge2firefly.config.load_dotenv", real_load_dotenv)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("FIREFLY_TOKEN=xyz\n")
+
+    s = _resolve()
+    assert s.token == "xyz"

@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from skrooge2firefly.cli import _parse_only, build_parser, main
+from skrooge2firefly.cli import _parse_only, _validate_date, build_parser, main
 from skrooge2firefly.config import ConfigError
 
 
@@ -67,6 +67,76 @@ def test_csv_target_end_to_end(skrooge_db: Path, populate, tmp_path: Path):
     )
     assert code == 0
     assert (out / "transactions.csv").exists()
+
+
+def test_csv_dry_run_writes_no_files(skrooge_db: Path, populate, tmp_path: Path):
+    populate(skrooge_db, "unit", [{"id": 1, "t_name": "SEK", "t_symbol": "SEK", "t_type": "1"}])
+    populate(
+        skrooge_db,
+        "account",
+        [
+            {
+                "id": 1,
+                "t_name": "Checking",
+                "t_type": "C",
+                "f_importbalance": 0.0,
+                "d_importdate": "2010-01-01",
+            },
+        ],
+    )
+    populate(skrooge_db, "payee", [{"id": 5, "t_name": "ICA"}])
+    populate(
+        skrooge_db,
+        "operation",
+        [
+            {"id": 1, "d_date": "2020-05-01", "rd_account_id": 1, "r_payee_id": 5, "rc_unit_id": 1},
+        ],
+    )
+    populate(skrooge_db, "suboperation", [{"id": 1, "rd_operation_id": 1, "f_value": -10.0}])
+
+    out = tmp_path / "out"
+    code = main(
+        ["--target", "csv", "--dry-run", "--input", str(skrooge_db), "--output", str(out)],
+        default_input="Skrooge-2026-05-30.sqlite",
+        default_url="https://firefly.example.com",
+    )
+    assert code == 0
+    assert not out.exists()
+
+
+def test_csv_target_warns_ignored_flags(skrooge_db: Path, tmp_path: Path, caplog):
+    out = tmp_path / "out"
+    with caplog.at_level("WARNING", logger="skrooge2firefly"):
+        code = main(
+            [
+                "--target",
+                "csv",
+                "--input",
+                str(skrooge_db),
+                "--output",
+                str(out),
+                "--update",
+                "--strict",
+                "--assume-empty-target",
+                "--concurrency",
+                "3",
+            ],
+            default_input="Skrooge-2026-05-30.sqlite",
+            default_url="https://firefly.example.com",
+        )
+    assert code == 0
+    text = "\n".join(caplog.messages)
+    assert "--update" in text
+    assert "--strict" in text
+    assert "--assume-empty-target" in text
+    assert "--concurrency" in text
+
+
+def test_csv_target_default_concurrency_is_one():
+    args = build_parser("Skrooge-2026-05-30.sqlite", "https://firefly.example.com").parse_args(
+        ["--target", "csv"]
+    )
+    assert args.concurrency == 1
 
 
 def test_api_target_without_token_errors(skrooge_db: Path, monkeypatch):
@@ -218,6 +288,29 @@ def test_parser_accepts_since_until():
     assert a.since == "2026-05-01" and a.until == "2026-05-31"
 
 
+def test_since_rejects_unpadded_date(skrooge_db: Path, monkeypatch):
+    with pytest.raises(ConfigError):
+        _validate_date("2020-1-5", "--since")
+
+    monkeypatch.setenv("FIREFLY_TOKEN", "x")
+    code = main(
+        ["--target", "csv", "--input", str(skrooge_db), "--since", "2020-1-5"],
+        default_input="Skrooge-2026-05-30.sqlite",
+        default_url="https://firefly.example.com",
+    )
+    assert code == 2
+
+
+def test_valid_dates_accepted():
+    _validate_date("2020-01-05", "--since")
+    _validate_date(None, "--since")
+
+
+def test_calendar_invalid_date_rejected():
+    with pytest.raises(ConfigError):
+        _validate_date("2020-02-30", "--until")
+
+
 # --- automatic post-import verification ---
 
 
@@ -316,3 +409,187 @@ def test_parse_only_rejects_subscriptions():
     # the old section name is no longer valid after the rename to "recurrences"
     with pytest.raises(ConfigError):
         _parse_only("subscriptions")
+
+
+# --- orphan flags / decisions file / dry-run plan ---
+
+
+def test_parser_accepts_orphans_and_decisions():
+    args = build_parser("x.sqlite", "https://f").parse_args(
+        ["--target", "api", "--update", "--orphans", "delete", "--decisions", "d.json"]
+    )
+    assert args.orphans == "delete"
+    assert str(args.decisions) == "d.json"
+
+
+def test_orphans_rejects_bad_value():
+    with pytest.raises(SystemExit):
+        build_parser("x.sqlite", "https://f").parse_args(["--target", "api", "--orphans", "wipe"])
+
+
+def test_orphans_and_decisions_default_to_none():
+    args = build_parser("x.sqlite", "https://f").parse_args(["--target", "api"])
+    assert args.orphans is None
+    assert args.decisions is None
+
+
+def test_build_decider_delete_flag_returns_fixed_delete():
+    from skrooge2firefly.cli import build_decider
+    from skrooge2firefly.writers.orphans import FixedDecider
+
+    args = build_parser("x.sqlite", "https://f").parse_args(
+        ["--target", "api", "--orphans", "delete"]
+    )
+    decider = build_decider(args)
+    assert isinstance(decider, FixedDecider)
+    assert decider.decide("transaction", "k", "label") == "delete"
+
+
+def test_build_decider_report_flag_returns_fixed_ignore():
+    from skrooge2firefly.cli import build_decider
+    from skrooge2firefly.writers.orphans import FixedDecider
+
+    args = build_parser("x.sqlite", "https://f").parse_args(
+        ["--target", "api", "--orphans", "report"]
+    )
+    decider = build_decider(args)
+    assert isinstance(decider, FixedDecider)
+    assert decider.decide("transaction", "k", "label") == "ignore"
+
+
+def test_build_decider_non_tty_without_flag_defaults_to_ignore(monkeypatch):
+    from skrooge2firefly.cli import build_decider
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    args = build_parser("x.sqlite", "https://f").parse_args(["--target", "api"])
+    decider = build_decider(args)
+    assert decider.decide("transaction", "k", "label") == "ignore"
+
+
+def test_build_decider_interactive_without_flag_prompts(monkeypatch):
+    from skrooge2firefly.cli import build_decider
+    from skrooge2firefly.writers.orphans import PromptDecider
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    args = build_parser("x.sqlite", "https://f").parse_args(["--target", "api"])
+    decider = build_decider(args)
+    assert isinstance(decider, PromptDecider)
+
+
+def test_run_writer_passes_orphan_decider_and_decisions_path(skrooge_db, monkeypatch):
+    monkeypatch.setenv("FIREFLY_TOKEN", "x")
+
+    from skrooge2firefly.writers import client as client_mod
+    from skrooge2firefly.writers import firefly_api as firefly_api_mod
+    from skrooge2firefly.writers.base import WriteReport
+    from skrooge2firefly.writers.orphans import FixedDecider
+
+    captured: dict = {}
+
+    class StubClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def get_version(self):
+            return "6.6.3"
+
+    class StubWriter:
+        def __init__(self, client, **kwargs):
+            captured.update(kwargs)
+
+        def write(self, mapper, only=None):
+            return WriteReport()
+
+    monkeypatch.setattr(client_mod, "FireflyClient", StubClient)
+    monkeypatch.setattr(firefly_api_mod, "FireflyApiWriter", StubWriter)
+    monkeypatch.setattr("skrooge2firefly.cli._run_verify", lambda *a, **k: 0)
+
+    code = main(
+        [
+            "--target",
+            "api",
+            "--input",
+            str(skrooge_db),
+            "--update",
+            "--orphans",
+            "delete",
+            "--decisions",
+            "d.json",
+        ],
+        default_input="Skrooge-2026-05-30.sqlite",
+        default_url="https://firefly.example.com",
+    )
+    assert code == 0
+    assert isinstance(captured["orphan_decider"], FixedDecider)
+    assert captured["orphan_decider"].decide("transaction", "k", "label") == "delete"
+    assert str(captured["decisions_path"]) == "d.json"
+    assert captured["resolve_orphans"] is True
+
+
+def test_run_writer_disables_orphan_resolution_when_since_is_set(skrooge_db, monkeypatch):
+    monkeypatch.setenv("FIREFLY_TOKEN", "x")
+
+    from skrooge2firefly.writers import client as client_mod
+    from skrooge2firefly.writers import firefly_api as firefly_api_mod
+    from skrooge2firefly.writers.base import WriteReport
+
+    captured: dict = {}
+
+    class StubClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def get_version(self):
+            return "6.6.3"
+
+    class StubWriter:
+        def __init__(self, client, **kwargs):
+            captured.update(kwargs)
+
+        def write(self, mapper, only=None):
+            return WriteReport()
+
+    monkeypatch.setattr(client_mod, "FireflyClient", StubClient)
+    monkeypatch.setattr(firefly_api_mod, "FireflyApiWriter", StubWriter)
+    monkeypatch.setattr("skrooge2firefly.cli._run_verify", lambda *a, **k: 0)
+
+    code = main(
+        [
+            "--target",
+            "api",
+            "--input",
+            str(skrooge_db),
+            "--update",
+            "--since",
+            "2024-01-01",
+            "--orphans",
+            "delete",
+        ],
+        default_input="Skrooge-2026-05-30.sqlite",
+        default_url="https://firefly.example.com",
+    )
+    assert code == 0
+    assert captured["resolve_orphans"] is False
+
+
+def test_dry_run_update_reports_per_type_plan(caplog):
+    import logging
+
+    from skrooge2firefly.cli import _report_preflight
+    from skrooge2firefly.writers.base import WriteReport
+
+    report = WriteReport()
+    report.created("transaction")
+    report.updated("transaction")
+    report.skipped("transaction")
+    report.deleted("transaction")
+
+    with caplog.at_level(logging.INFO, logger="skrooge2firefly"):
+        code = _report_preflight(report, update=True)
+
+    assert code == 0
+    text = "\n".join(caplog.messages)
+    assert "transaction" in text
+    assert "create=1" in text
+    assert "update=1" in text
+    assert "delete=1" in text

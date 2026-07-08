@@ -314,3 +314,184 @@ def test_subcent_split_dropped_but_real_splits_kept(skrooge_db, populate):
     m = _map(skrooge_db)
     [txn] = [t for t in m.transactions if t.external_id.startswith("skrooge:op:40")]
     assert [str(s.amount) for s in txn.splits] == ["42.25", "210.0"]
+
+
+def test_fx_conversion_quantizes_to_zero_decimal_currency(skrooge_db: Path, populate):
+    """A JPY-dominant account (0 decimal places) quantizes an FX-converted
+    amount to whole yen, not the hardcoded 2 decimals."""
+    populate(
+        skrooge_db,
+        "unit",
+        [
+            {"id": 1, "t_name": "Japanese yen", "t_symbol": "JPY", "t_type": "1", "i_nbdecimal": 0},
+            {"id": 2, "t_name": "US dollar", "t_symbol": "USD", "t_type": "C", "i_nbdecimal": 2},
+        ],
+    )
+    populate(skrooge_db, "account", [{"id": 1, "t_name": "Wallet", "t_type": "C"}])
+    # USD price in JPY (the primary currency) on 2020-01-01.
+    populate(
+        skrooge_db, "unitvalue", [{"rd_unit_id": 2, "d_date": "2020-01-01", "f_quantity": 149.876}]
+    )
+    populate(
+        skrooge_db,
+        "operation",
+        [
+            # Two JPY ops make JPY the account's dominant currency…
+            {"id": 1, "d_date": "2020-01-01", "rd_account_id": 1, "rc_unit_id": 1},
+            {"id": 2, "d_date": "2020-01-02", "rd_account_id": 1, "rc_unit_id": 1},
+            # …then a USD-denominated withdrawal needing conversion.
+            {"id": 3, "d_date": "2020-01-05", "rd_account_id": 1, "rc_unit_id": 2},
+        ],
+    )
+    populate(
+        skrooge_db,
+        "suboperation",
+        [
+            {"id": 1, "rd_operation_id": 1, "f_value": 1000.0},
+            {"id": 2, "rd_operation_id": 2, "f_value": 1000.0},
+            {"id": 3, "rd_operation_id": 3, "f_value": -10.0},
+        ],
+    )
+    m = _map(skrooge_db)
+    txn = next(t for t in m.transactions if t.external_id == "skrooge:op:3")
+    s = txn.splits[0]
+    assert s.currency_code == "JPY"
+    assert s.amount == Decimal("1499")  # 10 USD * 149.876 = 1498.76, rounded to whole yen
+    assert s.foreign_amount == Decimal("10.0") and s.foreign_currency_code == "USD"
+
+
+def test_fx_conversion_quantizes_to_three_decimal_currency(skrooge_db: Path, populate):
+    """A 3-decimal dominant currency (e.g. BHD) keeps its full precision on FX
+    conversion instead of being truncated to 2 decimals."""
+    populate(
+        skrooge_db,
+        "unit",
+        [
+            {
+                "id": 1,
+                "t_name": "Bahraini dinar",
+                "t_symbol": "BHD",
+                "t_type": "1",
+                "i_nbdecimal": 3,
+            },
+            {"id": 2, "t_name": "US dollar", "t_symbol": "USD", "t_type": "C", "i_nbdecimal": 2},
+        ],
+    )
+    populate(skrooge_db, "account", [{"id": 1, "t_name": "Vault", "t_type": "C"}])
+    # USD price in BHD (the primary currency) on 2020-01-01.
+    populate(
+        skrooge_db, "unitvalue", [{"rd_unit_id": 2, "d_date": "2020-01-01", "f_quantity": 0.37654}]
+    )
+    populate(
+        skrooge_db,
+        "operation",
+        [
+            {"id": 1, "d_date": "2020-01-01", "rd_account_id": 1, "rc_unit_id": 1},
+            {"id": 2, "d_date": "2020-01-02", "rd_account_id": 1, "rc_unit_id": 1},
+            {"id": 3, "d_date": "2020-01-05", "rd_account_id": 1, "rc_unit_id": 2},
+        ],
+    )
+    populate(
+        skrooge_db,
+        "suboperation",
+        [
+            {"id": 1, "rd_operation_id": 1, "f_value": 100.0},
+            {"id": 2, "rd_operation_id": 2, "f_value": 100.0},
+            {"id": 3, "rd_operation_id": 3, "f_value": -10.0},
+        ],
+    )
+    m = _map(skrooge_db)
+    txn = next(t for t in m.transactions if t.external_id == "skrooge:op:3")
+    s = txn.splits[0]
+    assert s.currency_code == "BHD"
+    assert s.amount == Decimal("3.765")  # 10 USD * 0.37654, kept at 3 decimals (not 3.77)
+    assert s.foreign_amount == Decimal("10.0") and s.foreign_currency_code == "USD"
+
+
+def test_subcent_threshold_scales_for_zero_decimal_currency(skrooge_db: Path, populate):
+    """In a 0-decimal currency, the sub-cent threshold is 0.5, not 0.005."""
+    populate(
+        skrooge_db,
+        "unit",
+        [{"id": 1, "t_name": "Japanese yen", "t_symbol": "JPY", "t_type": "C", "i_nbdecimal": 0}],
+    )
+    populate(skrooge_db, "account", [{"id": 1, "t_name": "Wallet", "t_type": "C"}])
+    populate(
+        skrooge_db,
+        "operation",
+        [
+            {"id": 1, "d_date": "2020-01-01", "rd_account_id": 1, "rc_unit_id": 1},
+            {"id": 2, "d_date": "2020-01-02", "rd_account_id": 1, "rc_unit_id": 1},
+        ],
+    )
+    populate(
+        skrooge_db,
+        "suboperation",
+        [
+            {"id": 1, "rd_operation_id": 1, "f_value": -0.4},
+            {"id": 2, "rd_operation_id": 2, "f_value": -1.0},
+        ],
+    )
+    m = _map(skrooge_db)
+    assert not any(t.external_id == "skrooge:op:1" for t in m.transactions)
+    assert any(t.external_id == "skrooge:op:2" for t in m.transactions)
+
+
+def test_subcent_threshold_scales_for_three_decimal_currency(skrooge_db: Path, populate):
+    """In a 3-decimal currency, a legitimate 0.001 is kept while a smaller
+    float-artifact amount is still dropped as sub-cent."""
+    populate(
+        skrooge_db,
+        "unit",
+        [{"id": 1, "t_name": "Bahraini dinar", "t_symbol": "BHD", "t_type": "C", "i_nbdecimal": 3}],
+    )
+    populate(skrooge_db, "account", [{"id": 1, "t_name": "Vault", "t_type": "C"}])
+    populate(
+        skrooge_db,
+        "operation",
+        [
+            {"id": 1, "d_date": "2020-01-01", "rd_account_id": 1, "rc_unit_id": 1},
+            {"id": 2, "d_date": "2020-01-02", "rd_account_id": 1, "rc_unit_id": 1},
+        ],
+    )
+    populate(
+        skrooge_db,
+        "suboperation",
+        [
+            {"id": 1, "rd_operation_id": 1, "f_value": -0.0001},
+            {"id": 2, "rd_operation_id": 2, "f_value": -0.001},
+        ],
+    )
+    m = _map(skrooge_db)
+    assert not any(t.external_id == "skrooge:op:1" for t in m.transactions)
+    txn = next(t for t in m.transactions if t.external_id == "skrooge:op:2")
+    assert txn.splits[0].amount == Decimal("0.001")
+
+
+def test_operation_with_missing_account_is_skipped_with_warning(skrooge_db: Path, populate):
+    """Skrooge's schema has no FK enforcement, so a deleted account can leave
+    orphaned operations referencing an account id that no longer exists. That
+    must not crash the whole import — the operation is skipped and warned
+    about instead (Fix A)."""
+    _base(populate, skrooge_db)
+    populate(
+        skrooge_db,
+        "operation",
+        [
+            {
+                "id": 20,
+                "d_date": "2020-01-01",
+                "rd_account_id": 999,  # no such account
+                "r_payee_id": 5,
+                "rc_unit_id": 1,
+            },
+        ],
+    )
+    populate(
+        skrooge_db,
+        "suboperation",
+        [{"id": 20, "rd_operation_id": 20, "r_category_id": 7, "f_value": -10.0}],
+    )
+    m = _map(skrooge_db)  # must not raise
+    assert not any(t.external_id.startswith("skrooge:op:20") for t in m.transactions)
+    assert any("unknown account 999" in w for w in m.warnings)

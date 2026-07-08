@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 import sqlite3
+from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import requests
 
@@ -16,6 +19,9 @@ from skrooge2firefly.skrooge.reader import SkroogeReader
 from skrooge2firefly.writers.base import WriteReport
 from skrooge2firefly.writers.client import FireflyError
 from skrooge2firefly.writers.csv_importer import CsvImporterWriter
+
+if TYPE_CHECKING:
+    from skrooge2firefly.writers.orphans import OrphanDecider
 
 logger = logging.getLogger("skrooge2firefly")
 
@@ -94,6 +100,19 @@ def build_parser(default_input: str, default_url: str) -> argparse.ArgumentParse
         help="Upsert: re-sync existing transactions and mirror account open/closed state.",
     )
     p.add_argument(
+        "--orphans",
+        choices=["report", "delete", "ignore"],
+        default=None,
+        help="What to do with records in Firefly but absent from the file "
+        "(update mode). Default: prompt when interactive, else report.",
+    )
+    p.add_argument(
+        "--decisions",
+        type=Path,
+        default=None,
+        help="Orphan-decisions plan file: written in --dry-run, applied on the real run.",
+    )
+    p.add_argument(
         "--verify",
         action="store_true",
         help="Read-only: compare Skrooge against Firefly and report parity (no writes).",
@@ -131,6 +150,19 @@ def build_parser(default_input: str, default_url: str) -> argparse.ArgumentParse
     return p
 
 
+def build_decider(args: argparse.Namespace) -> OrphanDecider:
+    """Pick the orphan decider implied by ``--orphans`` and terminal state."""
+    import sys
+
+    from skrooge2firefly.writers.orphans import FixedDecider, PromptDecider
+
+    if args.orphans in {"delete", "ignore"}:
+        return FixedDecider(args.orphans)
+    if args.orphans == "report" or not sys.stdin.isatty():
+        return FixedDecider("ignore")
+    return PromptDecider(input_fn=input, output_fn=print)
+
+
 def _parse_only(value: str | None) -> set[str] | None:
     if not value:
         return None
@@ -139,6 +171,28 @@ def _parse_only(value: str | None) -> set[str] | None:
     if invalid:
         raise ConfigError(f"Unknown --only sections: {', '.join(sorted(invalid))}")
     return requested
+
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _validate_date(value: str | None, flag: str) -> None:
+    """Raise :class:`ConfigError` unless ``value`` is a real, zero-padded ``YYYY-MM-DD`` date.
+
+    ``datetime.strptime`` alone is not enough: it accepts unpadded months/days
+    (e.g. ``2020-1-5``), which is exactly the typo this guards against, so the
+    format is checked strictly before the calendar validity is checked.
+    """
+    if value is None:
+        return
+    if not _DATE_RE.match(value):
+        raise ConfigError(f"Invalid {flag} date {value!r}: expected YYYY-MM-DD (zero-padded).")
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        raise ConfigError(
+            f"Invalid {flag} date {value!r}: expected YYYY-MM-DD (zero-padded)."
+        ) from None
 
 
 def filter_transactions(
@@ -170,6 +224,26 @@ def main(
     )
     try:
         only = _parse_only(args.only)
+        _validate_date(args.since, "--since")
+        _validate_date(args.until, "--until")
+        if args.orphans and not args.update:
+            logger.warning("--orphans has no effect without --update")
+        if args.target == "csv":
+            ignored = [
+                flag
+                for flag, active in (
+                    ("--update", args.update),
+                    ("--strict", args.strict),
+                    ("--assume-empty-target", args.assume_empty_target),
+                    ("--concurrency", args.concurrency != 1),
+                )
+                if active
+            ]
+            if ignored:
+                logger.warning(
+                    "%s only apply to --target api; ignored for --target csv",
+                    ", ".join(ignored),
+                )
         settings = Settings.resolve(
             url=args.url,
             token=args.token,
@@ -208,8 +282,8 @@ def main(
 
         report = _run_writer(args, settings, mapper, only)
         logger.info("Done.\n%s", report.summary())
-        if args.dry_run and args.target == "api":
-            return _report_preflight(report)
+        if args.dry_run:
+            return _report_preflight(report, update=args.update)
         if report.has_failures and not args.dry_run:
             for kind, msg in report.errors[:20]:
                 logger.error("%s failed: %s", kind, msg)
@@ -232,23 +306,47 @@ def main(
         return 2
 
 
-def _report_preflight(report: WriteReport) -> int:
+def _report_preflight(report: WriteReport, *, update: bool = False) -> int:
     """Summarise an API --dry-run as a pre-flight verdict; return the exit code.
 
     In dry-run the writer performs no writes: ``created`` counts what *would*
     be created, ``skipped`` what already exists on the instance, and ``failed``
-    records that would be rejected (e.g. an amount that rounds to 0.00).
+    records that would be rejected (e.g. an amount that rounds to 0.00). Under
+    ``--update`` also break the plan down per record kind, since dry-run is
+    the only place to preview creates/updates/deletes before they happen.
     """
     would_create = sum(c["created"] for c in report.counts.values())
     already = sum(c["skipped"] for c in report.counts.values())
     issues = sum(c["failed"] for c in report.counts.values())
-    logger.info(
-        "Pre-flight: %d record(s) would be created, %d already present, %d issue(s). "
-        "Nothing was written.",
-        would_create,
-        already,
-        issues,
-    )
+    if update:
+        would_update = sum(c["updated"] for c in report.counts.values())
+        would_delete = sum(c["deleted"] for c in report.counts.values())
+        logger.info(
+            "Pre-flight plan: %d to create, %d to update, %d unchanged, %d to delete, "
+            "%d issue(s). Nothing was written.",
+            would_create,
+            would_update,
+            already,
+            would_delete,
+            issues,
+        )
+        for kind, c in sorted(report.counts.items()):
+            logger.info(
+                "  %-14s create=%d update=%d unchanged=%d delete=%d",
+                kind,
+                c["created"],
+                c["updated"],
+                c["skipped"],
+                c["deleted"],
+            )
+    else:
+        logger.info(
+            "Pre-flight: %d record(s) would be created, %d already present, %d issue(s). "
+            "Nothing was written.",
+            would_create,
+            already,
+            issues,
+        )
     if issues:
         for kind, msg in report.errors[:20]:
             logger.error("pre-flight issue — %s: %s", kind, msg)
@@ -281,7 +379,9 @@ def _run_writer(
     only: set[str] | None,
 ) -> WriteReport:
     if args.target == "csv":
-        return CsvImporterWriter(output_dir=args.output).write(mapper, only=only)
+        return CsvImporterWriter(output_dir=args.output, dry_run=args.dry_run).write(
+            mapper, only=only
+        )
 
     # API target — imported lazily so CSV runs need no network deps configured.
     from skrooge2firefly.writers.client import FireflyClient
@@ -303,6 +403,9 @@ def _run_writer(
         assume_empty=args.assume_empty_target,
         concurrency=args.concurrency,
         update=args.update,
+        orphan_decider=build_decider(args),
+        decisions_path=args.decisions,
+        resolve_orphans=not (args.since or args.until),
     )
     return writer.write(mapper, only=only)
 

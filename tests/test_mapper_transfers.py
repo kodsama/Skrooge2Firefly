@@ -689,3 +689,103 @@ def test_foreign_currency_security_leg_is_fx_converted(skrooge_db: Path, populat
     assert s.amount == Decimal("1063.30")  # 1085 * 0.98
     assert s.foreign_amount == Decimal("1085.0") and s.foreign_currency_code == "NOK"
     assert "security" in s.tags
+
+
+def test_transfer_leg_with_missing_account_falls_back_and_warns(skrooge_db: Path, populate):
+    """Skrooge's schema has no FK enforcement, so a transfer leg can reference
+    an account id that no longer exists. The whole import must not crash —
+    the pair falls back to normal transactions, the valid leg still gets
+    imported, and the missing one is warned about and skipped (Fix A)."""
+    _setup(populate, skrooge_db)
+    populate(
+        skrooge_db,
+        "operation",
+        [
+            {
+                "id": 1,
+                "i_group_id": 100,
+                "d_date": "2020-05-01",
+                "rd_account_id": 1,
+                "rc_unit_id": 1,
+            },
+            {
+                "id": 2,
+                "i_group_id": 100,
+                "d_date": "2020-05-01",
+                "rd_account_id": 999,  # no such account
+                "rc_unit_id": 1,
+            },
+        ],
+    )
+    populate(
+        skrooge_db,
+        "suboperation",
+        [
+            {"id": 1, "rd_operation_id": 1, "f_value": -500.0},
+            {"id": 2, "rd_operation_id": 2, "f_value": 500.0},
+        ],
+    )
+    m = _map(skrooge_db)  # must not raise
+    assert not any(t.kind == "transfer" for t in m.transactions)
+    assert any(t.external_id == "skrooge:op:1" for t in m.transactions)
+    assert not any(t.external_id.startswith("skrooge:op:2") for t in m.transactions)
+    assert any("Transfer group 100" in w and "unknown account 999" in w for w in m.warnings)
+    assert any("Operation 2" in w and "unknown account 999" in w for w in m.warnings)
+
+
+def test_invalid_date_transfer_legs_fold_into_opening_balance(skrooge_db: Path, populate):
+    """An invalid-date (0000-00-00) transfer pair encodes each account's
+    opening balance the same way a plain invalid-date operation does; it must
+    be folded in, not silently skipped (Fix C)."""
+    populate(skrooge_db, "unit", [{"id": 1, "t_name": "SEK", "t_symbol": "SEK", "t_type": "1"}])
+    populate(
+        skrooge_db,
+        "account",
+        [
+            {"id": 1, "t_name": "Checking", "t_type": "C"},  # no f_importbalance
+            {"id": 2, "t_name": "Savings", "t_type": "S"},
+        ],
+    )
+    populate(
+        skrooge_db,
+        "operation",
+        [
+            {
+                "id": 1,
+                "i_group_id": 200,
+                "d_date": "0000-00-00",
+                "rd_account_id": 1,
+                "rc_unit_id": 1,
+            },
+            {
+                "id": 2,
+                "i_group_id": 200,
+                "d_date": "0000-00-00",
+                "rd_account_id": 2,
+                "rc_unit_id": 1,
+            },
+            {"id": 3, "d_date": "2020-06-01", "rd_account_id": 1, "rc_unit_id": 1},
+            {"id": 4, "d_date": "2020-06-02", "rd_account_id": 2, "rc_unit_id": 1},
+        ],
+    )
+    populate(
+        skrooge_db,
+        "suboperation",
+        [
+            {"id": 1, "rd_operation_id": 1, "f_value": -100.0},
+            {"id": 2, "rd_operation_id": 2, "f_value": 100.0},
+            {"id": 3, "rd_operation_id": 3, "f_value": 5.0},
+            {"id": 4, "rd_operation_id": 4, "f_value": 5.0},
+        ],
+    )
+    m = _map(skrooge_db)
+    # No transfer, and neither invalid-date leg becomes its own transaction.
+    assert not any(t.kind == "transfer" for t in m.transactions)
+    assert not any(
+        t.external_id.startswith("skrooge:op:1") or t.external_id.startswith("skrooge:op:2")
+        for t in m.transactions
+    )
+    checking = next(a for a in m.accounts if a.name == "Checking")
+    savings = next(a for a in m.accounts if a.name == "Savings")
+    assert checking.opening_balance == Decimal("-100.0")
+    assert savings.opening_balance == Decimal("100.0")

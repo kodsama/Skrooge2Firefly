@@ -155,6 +155,49 @@ def test_recurrence_zero_amount_skipped(skrooge_db: Path, populate):
     assert len(m.recurrences) == 0, "Zero-amount recurrence must be skipped"
 
 
+def test_recurrence_with_missing_account_is_skipped_with_warning(skrooge_db: Path, populate):
+    """A recurrence's underlying operation can reference an account id that no
+    longer exists (no FK enforcement in Skrooge's schema); the import must not
+    crash — the recurrence is skipped and warned about instead (Fix A)."""
+    populate(skrooge_db, "unit", [{"id": 1, "t_name": "SEK", "t_symbol": "SEK", "t_type": "1"}])
+    populate(skrooge_db, "payee", [{"id": 5, "t_name": "Landlord"}])
+    populate(skrooge_db, "category", [{"id": 7, "t_name": "Rent", "t_fullname": "Housing > Rent"}])
+    populate(
+        skrooge_db,
+        "operation",
+        [
+            {
+                "id": 1,
+                "d_date": "2020-05-01",
+                "rd_account_id": 999,  # no such account
+                "r_payee_id": 5,
+                "rc_unit_id": 1,
+            },
+        ],
+    )
+    populate(
+        skrooge_db,
+        "suboperation",
+        [{"id": 1, "rd_operation_id": 1, "r_category_id": 7, "f_value": -800.0}],
+    )
+    populate(
+        skrooge_db,
+        "recurrentoperation",
+        [
+            {
+                "id": 1,
+                "rd_operation_id": 1,
+                "d_date": "2020-06-01",
+                "i_period_increment": 1,
+                "t_period_unit": "M",
+            },
+        ],
+    )
+    m = _map(skrooge_db)  # must not raise
+    assert len(m.recurrences) == 0
+    assert any("Recurrence 1" in w and "unknown account 999" in w for w in m.warnings)
+
+
 def test_recurrence_unresolved_unit_uses_primary_currency(skrooge_db: Path, populate):
     """An operation with rc_unit_id=0 (unresolved) uses the primary currency (Fix A2)."""
     populate(

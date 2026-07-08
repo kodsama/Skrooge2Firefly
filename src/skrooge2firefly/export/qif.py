@@ -124,12 +124,12 @@ def _qif_account_type(account: Account) -> str:
     return {"ccAsset": "CCard", "cashWalletAsset": "Cash"}.get(account.role or "", "Bank")
 
 
-def _amount(value: Decimal) -> str:
-    return f"{value:.2f}"
+def _amount(value: Decimal, decimals: int) -> str:
+    return f"{value:.{decimals}f}"
 
 
-def _render_entry(entry: QifEntry) -> list[str]:
-    lines = [f"D{entry.date}", f"T{_amount(entry.amount)}", f"P{entry.payee}"]
+def _render_entry(entry: QifEntry, decimals: int) -> list[str]:
+    lines = [f"D{entry.date}", f"T{_amount(entry.amount, decimals)}", f"P{entry.payee}"]
     if entry.transfer_to is not None:
         lines.append(f"L[{entry.transfer_to}]")
     elif entry.category:
@@ -142,16 +142,27 @@ def _render_entry(entry: QifEntry) -> list[str]:
         lines.append(f"S{category or ''}")
         if memo:
             lines.append(f"E{memo}")
-        lines.append(f"${_amount(amount)}")
+        lines.append(f"${_amount(amount, decimals)}")
     lines.append("^")
     return lines
 
 
-def render_qif(accounts: list[Account], entries: dict[str, list[QifEntry]]) -> str:
-    """Render per-account QIF blocks for every account."""
+def render_qif(
+    accounts: list[Account],
+    entries: dict[str, list[QifEntry]],
+    decimals: dict[str, int] | None = None,
+) -> str:
+    """Render per-account QIF blocks for every account.
+
+    ``decimals`` maps currency code -> decimal places (from
+    ``FireflyClient.currency_decimals()``); an account's own currency decides
+    how its amounts are formatted, defaulting to 2 when unknown.
+    """
+    dp = decimals or {}
     lines: list[str] = []
     for account in accounts:
         qtype = _qif_account_type(account)
+        account_dp = dp.get(account.currency_code, 2)
         lines += ["!Account", f"N{account.name}", f"T{qtype}", "^", f"!Type:{qtype}"]
         if account.opening_balance is not None:
             lines += _render_entry(
@@ -163,8 +174,9 @@ def render_qif(accounts: list[Account], entries: dict[str, list[QifEntry]]) -> s
                     memo="",
                     reconciled=False,
                     transfer_to=account.name,
-                )
+                ),
+                account_dp,
             )
         for entry in entries.get(account.name, []):
-            lines += _render_entry(entry)
+            lines += _render_entry(entry, account_dp)
     return "\n".join(lines) + "\n"

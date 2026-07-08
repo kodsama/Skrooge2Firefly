@@ -1,5 +1,7 @@
 """Map Skrooge currency symbols to ISO 4217 (or custom) currency codes."""
 
+from decimal import Decimal
+
 # Skrooge stores display symbols, not ISO codes; t_internet_code holds rate-pair
 # strings (e.g. "EURSEK") and is unusable. Map the non-ISO symbols explicitly.
 _SYMBOL_TO_ISO: dict[str, str] = {
@@ -60,18 +62,21 @@ def rate_in_primary(
 
 
 def convert_amount(
-    amount: float,
+    amount: Decimal,
     from_id: int,
     to_id: int,
     primary_id: int,
     rates: dict[int, list[tuple[str, float]]],
     date: str,
-) -> float | None:
+) -> Decimal | None:
     """Convert ``amount`` from unit ``from_id`` to unit ``to_id`` on ``date``.
 
     Uses each unit's price in the primary currency (see :func:`rate_in_primary`):
-    ``amount * price(from) / price(to)``. Returns None when either rate is
-    unknown, so the caller can fall back to the face value.
+    ``amount * price(from) / price(to)``. The rates are looked up as ``float``
+    (Skrooge stores them that way) but converted via their string
+    representation before any arithmetic, so the whole computation happens in
+    Decimal and never reintroduces binary-float rounding noise. Returns None
+    when either rate is unknown, so the caller can fall back to the face value.
     """
     if from_id == to_id:
         return amount
@@ -79,4 +84,4 @@ def convert_amount(
     rate_to = rate_in_primary(rates, to_id, primary_id, date)
     if rate_from is None or rate_to is None or rate_to == 0:
         return None
-    return amount * rate_from / rate_to
+    return amount * Decimal(str(rate_from)) / Decimal(str(rate_to))

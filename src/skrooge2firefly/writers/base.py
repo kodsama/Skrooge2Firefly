@@ -14,7 +14,7 @@ class WriteReport:
     def __init__(self) -> None:
         """Initialize empty counters."""
         self.counts: dict[str, dict[str, int]] = defaultdict(
-            lambda: {"created": 0, "updated": 0, "skipped": 0, "failed": 0}
+            lambda: {"created": 0, "updated": 0, "skipped": 0, "deleted": 0, "failed": 0}
         )
         self.errors: list[tuple[str, str]] = []
 
@@ -29,6 +29,10 @@ class WriteReport:
     def skipped(self, kind: str) -> None:
         """Record a skipped (already-present) record of ``kind``."""
         self.counts[kind]["skipped"] += 1
+
+    def deleted(self, kind: str) -> None:
+        """Record a deleted record of ``kind``."""
+        self.counts[kind]["deleted"] += 1
 
     def failed(self, kind: str, message: str) -> None:
         """Record a failed record of ``kind`` with an error ``message``."""
@@ -46,7 +50,7 @@ class WriteReport:
         for kind, c in sorted(self.counts.items()):
             lines.append(
                 f"{kind:14s} created={c['created']:6d} updated={c['updated']:6d} "
-                f"skipped={c['skipped']:6d} failed={c['failed']:6d}"
+                f"skipped={c['skipped']:6d} deleted={c['deleted']:6d} failed={c['failed']:6d}"
             )
         return "\n".join(lines)
 

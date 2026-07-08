@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import shutil
 import sqlite3
+from collections import Counter
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
@@ -14,6 +15,11 @@ from skrooge2firefly.model.currency import iso_code
 from skrooge2firefly.model.entities import Account, Split, Transaction
 
 logger = logging.getLogger(__name__)
+
+
+class SkgExportError(RuntimeError):
+    """Raised when the pulled data cannot be written to a Skrooge file."""
+
 
 # Children before parents; parameters/node/unit/unitvalue are intentionally kept.
 # Tables absent from a minimal template are skipped (vm_budget_tmp/rule are
@@ -69,6 +75,22 @@ def _unit_map(conn: sqlite3.Connection, currencies: set[str]) -> dict[str, int]:
         )
         mapping[code] = int(cur.lastrowid or 0)
     return mapping
+
+
+def _default_currency(accounts: list[Account], currencies: set[str]) -> str:
+    """Return a deterministic currency to use when an account has none of its own.
+
+    Prefers the most common non-blank account currency (ties broken by first
+    occurrence); falls back to the lowest sorted currency seen anywhere in the
+    data (accounts or splits) if no account has a currency at all. Returns
+    "" if no currency can be determined anywhere in the pulled data.
+    """
+    counts = Counter(a.currency_code for a in accounts if a.currency_code)
+    if counts:
+        return counts.most_common(1)[0][0]
+    if currencies:
+        return sorted(currencies)[0]
+    return ""
 
 
 def _skg_account_type(account: Account) -> str:
@@ -169,8 +191,16 @@ def _insert_one_operation(
     account_ids: dict[str, int],
     category_ids: dict[str, int],
     refund_ids: dict[str, int],
+    default_currency: str,
 ) -> int:
-    unit_id = unit_map.get(account.currency_code) or next(iter(unit_map.values()))
+    currency = account.currency_code or default_currency
+    try:
+        unit_id = unit_map[currency]
+    except KeyError as exc:
+        raise SkgExportError(
+            f"No currency available to record operations for account {account.name!r}; "
+            "the pulled data has no currency information to fall back to."
+        ) from exc
     reconciled = all(s.reconciled for s in txn.splits)
     cur = conn.execute(
         "INSERT INTO operation (i_group_id, d_date, rd_account_id, r_payee_id, rc_unit_id, "
@@ -211,6 +241,7 @@ def _insert_operations(
     category_ids: dict[str, int],
     payee_ids: dict[str, int],
     refund_ids: dict[str, int],
+    default_currency: str,
 ) -> int:
     by_name = {a.name: a for a in data.accounts}
     count = 0
@@ -229,6 +260,7 @@ def _insert_operations(
             account_ids,
             category_ids,
             refund_ids,
+            default_currency,
         )
         conn.execute("UPDATE operation SET i_group_id=? WHERE id=?", (out_id, out_id))
         _insert_one_operation(
@@ -242,6 +274,7 @@ def _insert_operations(
             account_ids,
             category_ids,
             refund_ids,
+            default_currency,
         )
         return 2
 
@@ -262,6 +295,7 @@ def _insert_operations(
                 account_ids,
                 category_ids,
                 refund_ids,
+                default_currency,
             )
             count += 1
         elif txn.kind == "deposit" and first.destination_name in by_name:
@@ -279,6 +313,7 @@ def _insert_operations(
                 account_ids,
                 category_ids,
                 refund_ids,
+                default_currency,
             )
             count += 1
         elif txn.kind == "transfer":
@@ -295,6 +330,7 @@ def _insert_operations(
                     account_ids,
                     category_ids,
                     refund_ids,
+                    default_currency,
                 )
                 conn.execute("UPDATE operation SET i_group_id=? WHERE id=?", (out_id, out_id))
                 count += 1
@@ -310,6 +346,7 @@ def _insert_operations(
                     account_ids,
                     category_ids,
                     refund_ids,
+                    default_currency,
                 )
                 count += 1
     return count
@@ -360,13 +397,16 @@ def write_skg(template: Path, output: Path, data: PulledData) -> SkgReport:
     """Write ``data`` into a copy of ``template`` at ``output``."""
     if not template.exists():
         raise FileNotFoundError(f"Skrooge template not found: {template}")
+    currencies = {a.currency_code for a in data.accounts if a.currency_code}
+    currencies |= {s.currency_code for t in data.transactions for s in t.splits}
+    default_currency = _default_currency(data.accounts, currencies)
+    if default_currency:
+        currencies.add(default_currency)
     shutil.copyfile(template, output)
     report = SkgReport()
     conn = sqlite3.connect(str(output))
     try:
         _clear(conn)
-        currencies = {a.currency_code for a in data.accounts if a.currency_code}
-        currencies |= {s.currency_code for t in data.transactions for s in t.splits}
         unit_map = _unit_map(conn, currencies)
         account_ids = _insert_accounts(conn, data.accounts)
         category_ids = _insert_categories(conn, data.transactions)
@@ -374,7 +414,14 @@ def write_skg(template: Path, output: Path, data: PulledData) -> SkgReport:
         refund_ids = _insert_refunds(conn, data.transactions)
         report.accounts = len(account_ids)
         report.operations = _insert_operations(
-            conn, data, unit_map, account_ids, category_ids, payee_ids, refund_ids
+            conn,
+            data,
+            unit_map,
+            account_ids,
+            category_ids,
+            payee_ids,
+            refund_ids,
+            default_currency,
         )
         report.budgets = _insert_budgets(conn, data, category_ids, report.warnings)
         _write_balances(conn)

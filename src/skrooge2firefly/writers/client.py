@@ -184,6 +184,10 @@ class FireflyClient:
         """Create a budget limit for ``budget_id``."""
         self._post(f"budgets/{budget_id}/limits", payload)
 
+    def update_budget_limit(self, budget_id: str, limit_id: str, payload: dict[str, Any]) -> None:
+        """Update an existing budget limit for ``budget_id`` via PUT."""
+        self._put(f"budgets/{budget_id}/limits/{limit_id}", payload)
+
     def store_recurrence(self, payload: dict[str, Any]) -> str:
         """Create a recurring transaction and return its id."""
         return str(self._post("recurrences", payload)["data"]["id"])
@@ -306,6 +310,32 @@ class FireflyClient:
                     result.setdefault(ext, group_id)
         return result
 
+    def transactions_by_external_id(self, prefix: str = "skrooge:") -> dict[str, dict[str, Any]]:
+        """Map prefixed external_id -> {group_id, splits} for change detection."""
+        result: dict[str, dict[str, Any]] = {}
+        for item in self._paged("transactions"):
+            group_id = str(item["id"])
+            for split in item.get("attributes", {}).get("transactions", []):
+                ext = split.get("external_id")
+                if ext and ext.startswith(prefix):
+                    result.setdefault(ext, {"group_id": group_id, "splits": []})
+                    result[ext]["splits"].append(split)
+        return result
+
+    def recurrences_full(self) -> dict[str, dict[str, Any]]:
+        """Map recurrence title -> {id, attributes} for change detection."""
+        return {
+            item["attributes"]["title"]: {"id": str(item["id"]), "attributes": item["attributes"]}
+            for item in self._paged("recurrences")
+        }
+
+    def accounts_full(self, account_type: str) -> dict[str, dict[str, Any]]:
+        """Map account name -> {id, attributes} for change detection."""
+        return {
+            item["attributes"]["name"]: {"id": str(item["id"]), "attributes": item["attributes"]}
+            for item in self._paged("accounts", {"type": account_type})
+        }
+
     def account_states(self, account_type: str) -> dict[str, tuple[str, bool]]:
         """Map account name → (id, active) for accounts of ``account_type``."""
         result: dict[str, tuple[str, bool]] = {}
@@ -337,6 +367,18 @@ class FireflyClient:
     def update_account(self, account_id: str, payload: dict[str, Any]) -> None:
         """Update an existing account via PUT."""
         self._put(f"accounts/{account_id}", payload)
+
+    def update_recurrence(self, recurrence_id: str, payload: dict[str, Any]) -> None:
+        """Replace a recurring transaction via PUT."""
+        self._put(f"recurrences/{recurrence_id}", payload)
+
+    def delete_transaction(self, group_id: str) -> None:
+        """Delete a transaction group (idempotent: 404 tolerated)."""
+        self._delete(f"transactions/{group_id}")
+
+    def delete_recurrence(self, recurrence_id: str) -> None:
+        """Delete a recurring transaction (idempotent: 404 tolerated)."""
+        self._delete(f"recurrences/{recurrence_id}")
 
     def account_balances(self, account_type: str) -> dict[str, tuple[str, Decimal, str]]:
         """Return name → (id, balance, currency) for accounts of ``account_type``.
@@ -376,3 +418,8 @@ class FireflyClient:
         if not resp.ok:
             raise FireflyError(f"PUT {path} failed ({resp.status_code}): {resp.text}")
         return resp.json()  # type: ignore[no-any-return]
+
+    def _delete(self, path: str) -> None:
+        resp = self._send("DELETE", path)
+        if not resp.ok and resp.status_code != 404:
+            raise FireflyError(f"DELETE {path} failed ({resp.status_code}): {resp.text}")

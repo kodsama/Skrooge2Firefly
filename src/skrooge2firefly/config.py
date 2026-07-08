@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 
 
 class ConfigError(RuntimeError):
@@ -41,7 +41,7 @@ class Settings:
             default_input: Fallback Skrooge file when neither arg nor env provides one.
 
         """
-        load_dotenv()
+        load_dotenv(find_dotenv(usecwd=True))
         resolved_url = url or os.environ.get("FIREFLY_URL") or default_url
         resolved_token = token or os.environ.get("FIREFLY_TOKEN")
         resolved_input = input_path or Path(os.environ.get("SKROOGE_FILE") or default_input)
