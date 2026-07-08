@@ -1337,12 +1337,16 @@ def test_account_update_syncs_changed_opening_balance(tmp_path):
                 "name": "Checking",
                 "currency_code": "SEK",
                 "notes": "Bank: SEB",
+                "account_role": "defaultAsset",
                 "active": True,
                 "opening_balance": "50.00",
                 "opening_balance_date": "2010-01-01",
             },
         }
     }
+    # Every managed field (currency_code, notes, account_role,
+    # liability_type/direction) matches the mapper account below except the
+    # opening balance, so only opening_balance_changed can drive needs_update.
     m = _mapper_with_one_txn()  # Checking has opening_balance=100, notes="Bank: SEB" (unchanged)
     writer = FireflyApiWriter(client, ledger_path=tmp_path / "s.json", update=True)
     report = writer.write(m, only={"accounts"})
