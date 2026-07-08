@@ -172,6 +172,16 @@ class Mapper:
                     primary=unit.is_primary,
                 )
             )
+        # code -> decimal places, for quantizing FX-converted and sub-cent-filtered
+        # amounts to each currency's own precision (2dp default when unknown).
+        self._currency_decimals = {c.code: c.decimal_places for c in self.currencies}
+
+    def _decimal_places(self, currency_code: str) -> int:
+        return self._currency_decimals.get(currency_code, 2)
+
+    def _subcent_threshold(self, currency_code: str) -> Decimal:
+        """Half of the currency's smallest unit (0.005 for 2dp, 0.5 for 0dp, ...)."""
+        return Decimal(1).scaleb(-self._decimal_places(currency_code)) / 2
 
     def _infer_account_currencies(
         self, operations: list[sk.Operation], units: dict[int, sk.Unit]
@@ -219,7 +229,9 @@ class Mapper:
         if converted is None:
             return amount, op_currency, None, None  # no rate: keep face value
         dom_currency = iso_code(dominant_unit.symbol, dominant_unit.name)
-        return Decimal(str(round(converted, 2))), dom_currency, amount, op_currency
+        quantum = Decimal(1).scaleb(-self._decimal_places(dom_currency))
+        booked = Decimal(str(converted)).quantize(quantum)
+        return booked, dom_currency, amount, op_currency
 
     def _map_accounts(
         self,
@@ -331,15 +343,18 @@ class Mapper:
         suffix: str,
     ) -> None:
         splits = [self._make_split(op, account, payee, sub, kind, ctx) for sub in subs]
-        # Firefly renders amounts at 2 decimals and rejects 0.00, so sub-cent
-        # splits (Skrooge float artifacts like 1e-07 "fake operations") must go.
-        subcent = [s for s in splits if s.amount < Decimal("0.005")]
+        # Firefly rejects a 0-valued amount, so sub-cent splits (Skrooge float
+        # artifacts like 1e-07 "fake operations") must go. The threshold is half
+        # of the split's own currency's smallest unit (0.005 for 2dp, 0.5 for
+        # 0dp currencies like JPY, etc.) so real small amounts in high-precision
+        # currencies aren't mistaken for float noise.
+        subcent = [s for s in splits if s.amount < self._subcent_threshold(s.currency_code)]
         if subcent:
-            self.warnings.append(
-                f"Operation {op.id}: dropped {len(subcent)} sub-cent split(s) (round to 0.00)."
-            )
-            splits = [s for s in splits if s.amount >= Decimal("0.005")]
-        if not splits or sum((s.amount for s in splits), Decimal(0)) < Decimal("0.005"):
+            self.warnings.append(f"Operation {op.id}: dropped {len(subcent)} sub-cent split(s).")
+            splits = [s for s in splits if s.amount >= self._subcent_threshold(s.currency_code)]
+        if not splits or sum((s.amount for s in splits), Decimal(0)) < self._subcent_threshold(
+            splits[0].currency_code
+        ):
             return  # zero-value group; Firefly rejects amount-0 transactions
         group_title = op.comment if len(splits) > 1 else None
         self.transactions.append(
