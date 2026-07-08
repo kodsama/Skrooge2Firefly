@@ -12,7 +12,7 @@ import requests
 from skrooge2firefly.config import ConfigError, Settings
 from skrooge2firefly.export.puller import PulledData, pull
 from skrooge2firefly.export.qif import ledger_entries, render_qif
-from skrooge2firefly.export.skg import write_skg
+from skrooge2firefly.export.skg import SkgExportError, write_skg
 from skrooge2firefly.export.verify import AccountParity, verify_qif, verify_skg
 from skrooge2firefly.writers.client import FireflyError
 
@@ -155,6 +155,9 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("%s", exc)
         return 2
     except FileNotFoundError as exc:
+        logger.error("%s", exc)
+        return 2
+    except SkgExportError as exc:
         logger.error("%s", exc)
         return 2
     except (FireflyError, requests.RequestException) as exc:
