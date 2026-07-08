@@ -1065,6 +1065,92 @@ def test_update_mode_creates_when_absent(tmp_path):
     assert report.counts["transaction"]["created"] == 1
 
 
+def test_update_detects_changed_tags(tmp_path):
+    """A tags-only difference must be seen as a change (tags weren't compared before)."""
+    client = FakeClient()
+    m = _mapper_with_one_txn()
+    m.transactions[0] = Transaction(
+        m.transactions[0].external_id,
+        m.transactions[0].kind,
+        m.transactions[0].date,
+        [
+            Split(
+                Decimal("12.50"),
+                "SEK",
+                "Checking",
+                "ICA",
+                category_name="Food",
+                tags=("Trip",),
+            )
+        ],
+    )
+    writer = FireflyApiWriter(client, ledger_path=tmp_path / "s.json", update=True)
+    split = dict(writer._update_payload(m.transactions[0])["transactions"][0])
+    split["tags"] = ["Other"]  # differs from the mapper's "Trip"
+    client.existing_group_ids = {"skrooge:op:1": "500"}
+    client.existing_txn_content = {"skrooge:op:1": {"group_id": "500", "splits": [split]}}
+    report = writer.write(m, only={"transactions"})
+    assert client.updated_transactions[0][0] == "500"
+    assert report.counts["transaction"]["updated"] == 1
+
+
+def test_update_detects_changed_foreign_amount(tmp_path):
+    """A foreign_amount-only difference must be seen as a change."""
+    client = FakeClient()
+    m = _mapper_with_one_txn()
+    m.transactions[0] = Transaction(
+        m.transactions[0].external_id,
+        m.transactions[0].kind,
+        m.transactions[0].date,
+        [
+            Split(
+                Decimal("12.50"),
+                "SEK",
+                "Checking",
+                "ICA",
+                category_name="Food",
+                foreign_amount=Decimal("1.50"),
+                foreign_currency_code="EUR",
+            )
+        ],
+    )
+    writer = FireflyApiWriter(client, ledger_path=tmp_path / "s.json", update=True)
+    split = dict(writer._update_payload(m.transactions[0])["transactions"][0])
+    split["foreign_amount"] = "9.99"  # differs from the mapper's 1.50
+    client.existing_group_ids = {"skrooge:op:1": "500"}
+    client.existing_txn_content = {"skrooge:op:1": {"group_id": "500", "splits": [split]}}
+    report = writer.write(m, only={"transactions"})
+    assert client.updated_transactions[0][0] == "500"
+    assert report.counts["transaction"]["updated"] == 1
+
+
+def test_update_split_reorder_is_not_a_change(tmp_path):
+    """A multi-split transaction whose existing splits are in a different order,
+    but otherwise identical, must not be reported as changed (order-independent compare)."""
+    client = FakeClient()
+    m = Mapper()
+    m.transactions = [
+        Transaction(
+            external_id="skrooge:op:99",
+            kind="withdrawal",
+            date="2021-03-10",
+            splits=[
+                Split(Decimal("50"), "SEK", "Checking", "Shop A", category_name="Food"),
+                Split(Decimal("30"), "SEK", "Checking", "Shop B", category_name="Fun"),
+            ],
+            group_title="Holiday spending",
+        )
+    ]
+    writer = FireflyApiWriter(client, ledger_path=tmp_path / "s.json", update=True)
+    splits = writer._update_payload(m.transactions[0])["transactions"]
+    reversed_splits = [dict(splits[1]), dict(splits[0])]
+    client.existing_group_ids = {"skrooge:op:99": "500"}
+    client.existing_txn_content = {"skrooge:op:99": {"group_id": "500", "splits": reversed_splits}}
+    report = writer.write(m, only={"transactions"})
+    assert client.updated_transactions == []
+    assert report.counts["transaction"]["skipped"] == 1
+
+
 def test_update_mode_mirrors_account_active(tmp_path):
     from skrooge2firefly.model.entities import Account
 
@@ -1196,6 +1282,73 @@ def test_update_patches_changed_account_notes(tmp_path):
     report = writer.write(m, only={"accounts"})
     assert client.updated_accounts  # a PUT happened
     assert report.counts["account"]["updated"] >= 1
+
+
+def test_account_update_does_not_resend_unchanged_opening_balance(tmp_path):
+    """A notes-only change must not re-send opening_balance/opening_balance_date,
+    or it would revert a manual Firefly correction to the opening balance."""
+    client = FakeClient()
+    client.account_state_map = {"Checking": ("1", True)}
+    client.existing_account_attrs = {
+        "Checking": {
+            "id": "1",
+            "attributes": {
+                "name": "Checking",
+                "currency_code": "SEK",
+                "notes": "OLD",
+                "active": True,
+                "opening_balance": "100.00",
+                "opening_balance_date": "2010-01-01",
+            },
+        }
+    }
+    m = Mapper()
+    m.accounts = [
+        Account(
+            "skrooge:acct:1",
+            "Checking",
+            "asset",
+            None,
+            "SEK",
+            Decimal("100"),
+            "2010-01-01",
+            None,
+            "NEW",
+            active=True,
+        ),
+    ]
+    writer = FireflyApiWriter(client, ledger_path=tmp_path / "s.json", update=True)
+    report = writer.write(m, only={"accounts"})
+    assert client.updated_accounts  # the notes change triggers a PUT
+    payload = client.updated_accounts[0][1]
+    assert "opening_balance" not in payload
+    assert "opening_balance_date" not in payload
+    assert report.counts["account"]["updated"] == 1
+
+
+def test_account_update_syncs_changed_opening_balance(tmp_path):
+    """When the opening balance itself changed, it must be included and trigger a sync."""
+    client = FakeClient()
+    client.account_state_map = {"Checking": ("1", True)}
+    client.existing_account_attrs = {
+        "Checking": {
+            "id": "1",
+            "attributes": {
+                "name": "Checking",
+                "currency_code": "SEK",
+                "notes": "Bank: SEB",
+                "active": True,
+                "opening_balance": "50.00",
+                "opening_balance_date": "2010-01-01",
+            },
+        }
+    }
+    m = _mapper_with_one_txn()  # Checking has opening_balance=100, notes="Bank: SEB" (unchanged)
+    writer = FireflyApiWriter(client, ledger_path=tmp_path / "s.json", update=True)
+    report = writer.write(m, only={"accounts"})
+    payload = client.updated_accounts[0][1]
+    assert payload["opening_balance"] == "100.00"
+    assert report.counts["account"]["updated"] == 1
 
 
 def test_description_combines_payee_and_category(tmp_path):

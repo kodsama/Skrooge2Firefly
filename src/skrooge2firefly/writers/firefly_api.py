@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import calendar
 import logging
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
@@ -347,7 +348,7 @@ class FireflyApiWriter:
             report.created("currency")
 
     def _write_accounts(self, mapper: Mapper, report: WriteReport) -> None:
-        from skrooge2firefly.writers.diffing import norm_str
+        from skrooge2firefly.writers.diffing import norm_amount, norm_str
 
         managed_keys = (
             "currency_code",
@@ -356,6 +357,12 @@ class FireflyApiWriter:
             "liability_type",
             "liability_direction",
         )
+
+        def _opening_balance_key(value: Any) -> Decimal | None:
+            if value is None or value == "":
+                return None
+            return norm_amount(value)
+
         for acct in mapper.accounts:
             if self._update and acct.name in self._account_states:
                 account_id, current_active = self._account_states[acct.name]
@@ -370,11 +377,22 @@ class FireflyApiWriter:
                 existing_attrs = self._existing_account_attrs.get(acct.name, {}).get(
                     "attributes", {}
                 )
+                # Only resend the opening balance when it actually changed:
+                # otherwise an unrelated field update (e.g. notes) would
+                # re-apply it and silently revert a manual Firefly correction.
+                opening_balance_changed = _opening_balance_key(
+                    acct.opening_balance
+                ) != _opening_balance_key(existing_attrs.get("opening_balance"))
+                if not opening_balance_changed:
+                    payload.pop("opening_balance", None)
+                    payload.pop("opening_balance_date", None)
                 fields_differ = any(
                     norm_str(payload.get(k)) != norm_str(existing_attrs.get(k))
                     for k in managed_keys
                 )
-                needs_update = current_active != acct.active or fields_differ
+                needs_update = (
+                    current_active != acct.active or fields_differ or opening_balance_changed
+                )
                 if needs_update and not self._dry_run:
                     try:
                         self._client.update_account(account_id, payload)
@@ -553,26 +571,37 @@ class FireflyApiWriter:
                 self._note_transaction_failure()
 
     def _txn_changed(self, txn: Transaction, existing: dict[str, Any]) -> bool:
-        """Return True if any managed field differs from the transaction on the server."""
+        """Return True if any managed field differs from the transaction on the server.
+
+        Splits are compared as an unordered multiset (a reordered multi-split
+        transaction is not a change) and every field we manage — including
+        foreign amount/currency and tags — is included. Fields we don't manage
+        (reconciled, order, external_id) stay excluded.
+        """
         from skrooge2firefly.writers.diffing import norm_amount, norm_date, norm_str
+
+        def _split_key(split: dict[str, Any]) -> tuple[Any, ...]:
+            foreign_amount = split.get("foreign_amount")
+            foreign_key = norm_amount(foreign_amount) if foreign_amount is not None else None
+            return (
+                norm_str(split.get("type")),
+                norm_date(str(split.get("date"))),
+                norm_amount(split.get("amount", "0")),
+                norm_str(split.get("currency_code")),
+                norm_str(split.get("description")),
+                norm_str(split.get("source_name")),
+                norm_str(split.get("destination_name")),
+                norm_str(split.get("category_name")),
+                foreign_key,
+                norm_str(split.get("foreign_currency_code")),
+                frozenset(split.get("tags") or []),
+            )
 
         desired = self._update_payload(txn)["transactions"]
         current = existing.get("splits", [])
         if len(desired) != len(current):
             return True
-        for d, c in zip(desired, current, strict=True):
-            if (
-                norm_str(d.get("type")) != norm_str(c.get("type"))
-                or norm_date(str(d.get("date"))) != norm_date(str(c.get("date")))
-                or norm_amount(d["amount"]) != norm_amount(c.get("amount", "0"))
-                or norm_str(d.get("currency_code")) != norm_str(c.get("currency_code"))
-                or norm_str(d.get("description")) != norm_str(c.get("description"))
-                or norm_str(d.get("source_name")) != norm_str(c.get("source_name"))
-                or norm_str(d.get("destination_name")) != norm_str(c.get("destination_name"))
-                or norm_str(d.get("category_name")) != norm_str(c.get("category_name"))
-            ):
-                return True
-        return False
+        return Counter(_split_key(d) for d in desired) != Counter(_split_key(c) for c in current)
 
     def _update_payload(self, txn: Transaction) -> dict[str, Any]:
         splits = [self._split_payload(txn, s, i) for i, s in enumerate(txn.splits)]
