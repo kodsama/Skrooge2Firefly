@@ -139,7 +139,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip reconciliation reads (empty instance).",
     )
-    imp.add_argument("--concurrency", default=None, help="Parallel transaction POSTs (default 4).")
+    imp.add_argument("--concurrency", default=None, help="Parallel transaction POSTs (default 1).")
 
     exp = p.add_argument_group("export options (with --export)")
     exp.add_argument(

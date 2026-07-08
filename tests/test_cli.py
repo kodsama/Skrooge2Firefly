@@ -104,6 +104,41 @@ def test_csv_dry_run_writes_no_files(skrooge_db: Path, populate, tmp_path: Path)
     assert not out.exists()
 
 
+def test_csv_target_warns_ignored_flags(skrooge_db: Path, tmp_path: Path, caplog):
+    out = tmp_path / "out"
+    with caplog.at_level("WARNING", logger="skrooge2firefly"):
+        code = main(
+            [
+                "--target",
+                "csv",
+                "--input",
+                str(skrooge_db),
+                "--output",
+                str(out),
+                "--update",
+                "--strict",
+                "--assume-empty-target",
+                "--concurrency",
+                "3",
+            ],
+            default_input="Skrooge-2026-05-30.sqlite",
+            default_url="https://firefly.example.com",
+        )
+    assert code == 0
+    text = "\n".join(caplog.messages)
+    assert "--update" in text
+    assert "--strict" in text
+    assert "--assume-empty-target" in text
+    assert "--concurrency" in text
+
+
+def test_csv_target_default_concurrency_is_one():
+    args = build_parser("Skrooge-2026-05-30.sqlite", "https://firefly.example.com").parse_args(
+        ["--target", "csv"]
+    )
+    assert args.concurrency == 1
+
+
 def test_api_target_without_token_errors(skrooge_db: Path, monkeypatch):
     monkeypatch.delenv("FIREFLY_TOKEN", raising=False)
     code = main(

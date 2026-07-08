@@ -228,6 +228,22 @@ def main(
         _validate_date(args.until, "--until")
         if args.orphans and not args.update:
             logger.warning("--orphans has no effect without --update")
+        if args.target == "csv":
+            ignored = [
+                flag
+                for flag, active in (
+                    ("--update", args.update),
+                    ("--strict", args.strict),
+                    ("--assume-empty-target", args.assume_empty_target),
+                    ("--concurrency", args.concurrency != 1),
+                )
+                if active
+            ]
+            if ignored:
+                logger.warning(
+                    "%s only apply to --target api; ignored for --target csv",
+                    ", ".join(ignored),
+                )
         settings = Settings.resolve(
             url=args.url,
             token=args.token,
