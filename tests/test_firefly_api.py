@@ -29,6 +29,7 @@ class FakeClient:
         self.stored_transactions: list[dict] = []
         self.stored_budgets: list[dict] = []
         self.stored_budget_limits: list[tuple[str, dict]] = []
+        self.updated_budget_limits: list[tuple[str, str, dict]] = []
         self.stored_recurrences: list[dict] = []
         self.updated_transactions: list[tuple] = []
         self.updated_accounts: list[tuple] = []
@@ -67,6 +68,9 @@ class FakeClient:
 
     def store_budget_limit(self, budget_id: str, payload: dict) -> None:
         self.stored_budget_limits.append((budget_id, payload))
+
+    def update_budget_limit(self, budget_id: str, limit_id: str, payload: dict) -> None:
+        self.updated_budget_limits.append((budget_id, limit_id, payload))
 
     def store_recurrence(self, payload: dict) -> str:
         self.stored_recurrences.append(payload)
@@ -779,6 +783,66 @@ def test_update_adds_missing_budget_limit(tmp_path):
     report = writer.write(m, only={"budgets"})
     assert len(client.stored_budget_limits) == 1
     assert report.counts["budget"]["updated"] == 1
+
+
+def test_update_budget_limit_amount_updates_in_place(tmp_path):
+    client = FakeClient()
+    client.existing_budgets = {"Food": "7"}
+    client.existing_budget_limits_raw = [
+        (
+            "Food",
+            [
+                {
+                    "id": "3",
+                    "attributes": {
+                        "start": "2020-01-01",
+                        "end": "2020-01-31",
+                        "amount": "500.00",
+                    },
+                }
+            ],
+        )
+    ]
+    m = Mapper()
+    m.budgets = [
+        IRBudget(name="Food", limits=[BudgetLimit("2020-01-01", "2020-01-31", Decimal("600"))])
+    ]
+    writer = FireflyApiWriter(client, ledger_path=tmp_path / "s.json", update=True)
+    report = writer.write(m, only={"budgets"})
+    assert client.updated_budget_limits == [
+        ("7", "3", {"start": "2020-01-01", "end": "2020-01-31", "amount": "600.00"})
+    ]
+    assert len(client.stored_budget_limits) == 0
+    assert report.counts["budget"]["updated"] == 1
+
+
+def test_update_budget_limit_same_amount_is_skipped(tmp_path):
+    client = FakeClient()
+    client.existing_budgets = {"Food": "7"}
+    client.existing_budget_limits_raw = [
+        (
+            "Food",
+            [
+                {
+                    "id": "3",
+                    "attributes": {
+                        "start": "2020-01-01",
+                        "end": "2020-01-31",
+                        "amount": "500.00",
+                    },
+                }
+            ],
+        )
+    ]
+    m = Mapper()
+    m.budgets = [
+        IRBudget(name="Food", limits=[BudgetLimit("2020-01-01", "2020-01-31", Decimal("500"))])
+    ]
+    writer = FireflyApiWriter(client, ledger_path=tmp_path / "s.json", update=True)
+    report = writer.write(m, only={"budgets"})
+    assert len(client.updated_budget_limits) == 0
+    assert len(client.stored_budget_limits) == 0
+    assert report.counts["budget"]["skipped"] == 1
 
 
 def test_assume_empty_skips_reconciliation(tmp_path):

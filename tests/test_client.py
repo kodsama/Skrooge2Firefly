@@ -686,6 +686,18 @@ def test_update_recurrence_puts(client: FireflyClient):
 
 
 @responses.activate
+def test_update_budget_limit_puts(client: FireflyClient):
+    responses.add(
+        responses.PUT, f"{BASE}/api/v1/budgets/7/limits/3", json={"data": {"id": "3"}}, status=200
+    )
+    client.update_budget_limit(
+        "7", "3", {"start": "2020-01-01", "end": "2020-01-31", "amount": "600.00"}
+    )
+    assert responses.calls[-1].request.method == "PUT"
+    assert responses.calls[-1].request.url == f"{BASE}/api/v1/budgets/7/limits/3"
+
+
+@responses.activate
 def test_recurrences_full_maps_title(client: FireflyClient):
     responses.add(
         responses.GET,

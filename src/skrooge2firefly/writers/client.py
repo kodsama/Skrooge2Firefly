@@ -184,6 +184,10 @@ class FireflyClient:
         """Create a budget limit for ``budget_id``."""
         self._post(f"budgets/{budget_id}/limits", payload)
 
+    def update_budget_limit(self, budget_id: str, limit_id: str, payload: dict[str, Any]) -> None:
+        """Update an existing budget limit for ``budget_id`` via PUT."""
+        self._put(f"budgets/{budget_id}/limits/{limit_id}", payload)
+
     def store_recurrence(self, payload: dict[str, Any]) -> str:
         """Create a recurring transaction and return its id."""
         return str(self._post("recurrences", payload)["data"]["id"])

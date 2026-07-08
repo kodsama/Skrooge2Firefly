@@ -205,7 +205,7 @@ class FireflyApiWriter:
         self._existing_txn_content: dict[str, dict[str, Any]] = {}
         self._recurrence_index: dict[str, str] = {}
         self._existing_recurrences: dict[str, dict[str, Any]] = {}
-        self._existing_budget_limits: dict[str, set[tuple[str, str, Any]]] = {}
+        self._existing_budget_limits: dict[str, dict[tuple[str, str], dict[str, Any]]] = {}
         self._consecutive_failures = 0
         self._account_active: dict[str, bool] = {}  # live remote active-state by name
         self._currency_decimals: dict[str, int] = {}
@@ -309,13 +309,11 @@ class FireflyApiWriter:
             self._existing_recurrences = self._client.recurrences_full()
             self._existing_budget_limits = {
                 name: {
-                    (
-                        a["attributes"]["start"],
-                        a["attributes"]["end"],
-                        norm_amount(a["attributes"]["amount"]),
-                    )
-                    for it in limits
-                    for a in [it]
+                    (item["attributes"]["start"], item["attributes"]["end"]): {
+                        "id": str(item["id"]),
+                        "amount": norm_amount(item["attributes"]["amount"]),
+                    }
+                    for item in limits
                 }
                 for name, limits in self._client.list_budgets_with_limits()
             }
@@ -699,26 +697,42 @@ class FireflyApiWriter:
                     raise
 
     def _sync_budget_limits(self, budget: IRBudget, report: WriteReport) -> None:
-        """Post any of ``budget``'s limits missing on the server; report the outcome."""
+        """Create missing limits and update changed-amount limits in place.
+
+        A limit is keyed by its (start, end) period. A period absent on the
+        server is created; a period present with a different amount is
+        updated via PUT (never re-POSTed, which would leave two limits for
+        the same period); a period with the same amount is left alone.
+        """
         from skrooge2firefly.writers.diffing import norm_amount
 
-        existing = self._existing_budget_limits.get(budget.name, set())
-        desired = [
-            (limit, (limit.start, limit.end, norm_amount(_amount(limit.amount))))
-            for limit in budget.limits
-        ]
-        missing = [limit for limit, key in desired if key not in existing]
-        if not missing:
+        existing = self._existing_budget_limits.get(budget.name, {})
+        to_create = []
+        to_update = []
+        for limit in budget.limits:
+            period = (limit.start, limit.end)
+            current = existing.get(period)
+            if current is None:
+                to_create.append(limit)
+            elif current["amount"] != norm_amount(_amount(limit.amount)):
+                to_update.append((limit, current["id"]))
+        if not to_create and not to_update:
             report.skipped("budget")
             return
         if self._dry_run:
-            report.updated("budget")  # pre-flight: would be updated
+            report.updated("budget")  # pre-flight: would be created/updated
             return
         budget_id = self._budget_index[budget.name]
         try:
-            for limit in missing:
+            for limit in to_create:
                 self._client.store_budget_limit(
                     budget_id,
+                    {"start": limit.start, "end": limit.end, "amount": _amount(limit.amount)},
+                )
+            for limit, limit_id in to_update:
+                self._client.update_budget_limit(
+                    budget_id,
+                    limit_id,
                     {"start": limit.start, "end": limit.end, "amount": _amount(limit.amount)},
                 )
             report.updated("budget")
