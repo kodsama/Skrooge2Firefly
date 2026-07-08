@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -171,6 +173,28 @@ def _parse_only(value: str | None) -> set[str] | None:
     return requested
 
 
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _validate_date(value: str | None, flag: str) -> None:
+    """Raise :class:`ConfigError` unless ``value`` is a real, zero-padded ``YYYY-MM-DD`` date.
+
+    ``datetime.strptime`` alone is not enough: it accepts unpadded months/days
+    (e.g. ``2020-1-5``), which is exactly the typo this guards against, so the
+    format is checked strictly before the calendar validity is checked.
+    """
+    if value is None:
+        return
+    if not _DATE_RE.match(value):
+        raise ConfigError(f"Invalid {flag} date {value!r}: expected YYYY-MM-DD (zero-padded).")
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        raise ConfigError(
+            f"Invalid {flag} date {value!r}: expected YYYY-MM-DD (zero-padded)."
+        ) from None
+
+
 def filter_transactions(
     transactions: list[Transaction], since: str | None, until: str | None
 ) -> list[Transaction]:
@@ -200,6 +224,8 @@ def main(
     )
     try:
         only = _parse_only(args.only)
+        _validate_date(args.since, "--since")
+        _validate_date(args.until, "--until")
         if args.orphans and not args.update:
             logger.warning("--orphans has no effect without --update")
         settings = Settings.resolve(

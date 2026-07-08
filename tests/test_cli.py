@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from skrooge2firefly.cli import _parse_only, build_parser, main
+from skrooge2firefly.cli import _parse_only, _validate_date, build_parser, main
 from skrooge2firefly.config import ConfigError
 
 
@@ -216,6 +216,29 @@ def test_parser_accepts_since_until():
     p = build_parser("Skrooge-2026-05-30.sqlite", "https://firefly.example.com")
     a = p.parse_args(["--target", "api", "--since", "2026-05-01", "--until", "2026-05-31"])
     assert a.since == "2026-05-01" and a.until == "2026-05-31"
+
+
+def test_since_rejects_unpadded_date(skrooge_db: Path, monkeypatch):
+    with pytest.raises(ConfigError):
+        _validate_date("2020-1-5", "--since")
+
+    monkeypatch.setenv("FIREFLY_TOKEN", "x")
+    code = main(
+        ["--target", "csv", "--input", str(skrooge_db), "--since", "2020-1-5"],
+        default_input="Skrooge-2026-05-30.sqlite",
+        default_url="https://firefly.example.com",
+    )
+    assert code == 2
+
+
+def test_valid_dates_accepted():
+    _validate_date("2020-01-05", "--since")
+    _validate_date(None, "--since")
+
+
+def test_calendar_invalid_date_rejected():
+    with pytest.raises(ConfigError):
+        _validate_date("2020-02-30", "--until")
 
 
 # --- automatic post-import verification ---
