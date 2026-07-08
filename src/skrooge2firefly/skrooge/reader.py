@@ -6,6 +6,7 @@ import sqlite3
 import unicodedata
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 from types import TracebackType
 from typing import Any
@@ -409,8 +410,10 @@ class SkroogeReader:
             balance = 0.0
             if dominant is not None and primary is not None:
                 for uid, value, date in cash_ops[aid]:
-                    converted = convert_amount(value, uid, dominant, primary, rates, date)
-                    balance += converted if converted is not None else value
+                    converted = convert_amount(
+                        Decimal(str(value)), uid, dominant, primary, rates, date
+                    )
+                    balance += float(converted) if converted is not None else value
             result[name] = AccountAudit(
                 name=name,
                 cash_balance=round(balance, 2),

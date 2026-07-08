@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from skrooge2firefly.model.currency import iso_code
 
 
@@ -47,14 +49,23 @@ def test_rate_missing_unit_returns_none():
 
 def test_convert_foreign_to_primary():
     # 100 USD on 2018-06-05 -> 100 * 9.0 / 1 = 900 SEK
-    assert convert_amount(100.0, 3, 1, _PRIMARY, _RATES, "2018-06-05") == 900.0
+    assert convert_amount(Decimal("100"), 3, 1, _PRIMARY, _RATES, "2018-06-05") == Decimal("900")
 
 
 def test_convert_between_two_foreign():
     # 100 USD -> EUR on 2018-06-05: 100 * 9.0 / 11.0
-    got = convert_amount(100.0, 3, 2, _PRIMARY, _RATES, "2018-06-05")
-    assert abs(got - (100.0 * 9.0 / 11.0)) < 1e-9
+    got = convert_amount(Decimal("100"), 3, 2, _PRIMARY, _RATES, "2018-06-05")
+    assert got is not None
+    assert abs(got - (Decimal("100") * Decimal("9.0") / Decimal("11.0"))) < Decimal("1e-9")
 
 
 def test_convert_missing_rate_returns_none():
-    assert convert_amount(100.0, 999, 1, _PRIMARY, _RATES, "2020-01-01") is None
+    assert convert_amount(Decimal("100"), 999, 1, _PRIMARY, _RATES, "2020-01-01") is None
+
+
+def test_convert_is_exact_decimal_no_float_noise():
+    # 10 * 0.37654 in binary float is 3.7653999999999996; Decimal arithmetic
+    # must produce the exact result instead.
+    rates = {5: [("2018-01-01", 0.37654)]}
+    got = convert_amount(Decimal("10"), 5, _PRIMARY, _PRIMARY, rates, "2018-06-05")
+    assert got == Decimal("3.7654")

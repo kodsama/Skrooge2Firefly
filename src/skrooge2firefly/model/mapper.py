@@ -177,7 +177,8 @@ class Mapper:
         self._currency_decimals = {c.code: c.decimal_places for c in self.currencies}
 
     def _decimal_places(self, currency_code: str) -> int:
-        return self._currency_decimals.get(currency_code, 2)
+        dp = self._currency_decimals.get(currency_code)
+        return 2 if dp is None else dp
 
     def _subcent_threshold(self, currency_code: str) -> Decimal:
         """Half of the currency's smallest unit (0.005 for 2dp, 0.5 for 0dp, ...)."""
@@ -224,13 +225,13 @@ class Mapper:
         if op.unit_id == dominant_unit_id or dominant_unit is None or ctx.primary_unit_id is None:
             return amount, op_currency, None, None
         converted = convert_amount(
-            float(amount), op.unit_id, dominant_unit_id, ctx.primary_unit_id, ctx.rates, op.date
+            amount, op.unit_id, dominant_unit_id, ctx.primary_unit_id, ctx.rates, op.date
         )
         if converted is None:
             return amount, op_currency, None, None  # no rate: keep face value
         dom_currency = iso_code(dominant_unit.symbol, dominant_unit.name)
         quantum = Decimal(1).scaleb(-self._decimal_places(dom_currency))
-        booked = Decimal(str(converted)).quantize(quantum)
+        booked = converted.quantize(quantum)
         return booked, dom_currency, amount, op_currency
 
     def _map_accounts(
