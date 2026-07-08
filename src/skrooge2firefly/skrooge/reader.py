@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import unicodedata
 from collections import Counter, defaultdict
@@ -12,6 +13,8 @@ from types import TracebackType
 from typing import Any
 
 from skrooge2firefly.model.currency import convert_amount
+
+logger = logging.getLogger(__name__)
 
 
 def _opt_float(value: Any) -> float | None:
@@ -414,7 +417,7 @@ class SkroogeReader:
                         Decimal(str(value)), uid, dominant, primary, rates, date
                     )
                     balance += float(converted) if converted is not None else value
-            result[name] = AccountAudit(
+            audit = AccountAudit(
                 name=name,
                 cash_balance=round(balance, 2),
                 currency=unit_symbol.get(dominant, "") if dominant is not None else "",
@@ -422,6 +425,28 @@ class SkroogeReader:
                 mixed_currency=counts is not None and len(counts) > 1,
                 legs_differ=aid in legs_differ,
             )
+            existing = result.get(name)
+            if existing is not None:
+                # Skrooge has no UNIQUE constraint on account name, and the
+                # writer matches Firefly accounts by name too (see
+                # writers/firefly_api.py), so two same-named Skrooge accounts
+                # end up feeding the same Firefly account. Sum their balances
+                # under that shared name instead of silently dropping one —
+                # that matches what Firefly will actually hold.
+                logger.warning(
+                    "Duplicate account name %r (ids collide when matched by name in "
+                    "Firefly); merging their balances for the balance-parity check.",
+                    name,
+                )
+                audit = AccountAudit(
+                    name=name,
+                    cash_balance=round(existing.cash_balance + audit.cash_balance, 2),
+                    currency=existing.currency or audit.currency,
+                    has_shares=existing.has_shares or audit.has_shares,
+                    mixed_currency=existing.mixed_currency or audit.mixed_currency,
+                    legs_differ=existing.legs_differ or audit.legs_differ,
+                )
+            result[name] = audit
         return result
 
     def exchange_rates(self) -> dict[int, list[tuple[str, float]]]:

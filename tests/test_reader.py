@@ -222,6 +222,49 @@ def test_account_audits_flags_mixed_currency_and_legs_differ(skrooge_db, populat
     assert audits["Loan"].legs_differ is True
 
 
+def test_account_audits_merges_duplicate_names_and_warns(skrooge_db, populate, caplog):
+    """Skrooge's schema has no UNIQUE constraint on account name, so two
+    accounts can share one; account_audits() must not silently drop one of
+    them (Fix B). The writer matches Firefly accounts by name too, so both
+    Skrooge accounts feed the same Firefly account — summing their balances
+    under the shared name reflects that, and a warning makes the collision
+    visible instead of a silent overwrite."""
+    populate(
+        skrooge_db,
+        "unit",
+        [{"id": 1, "t_name": "Swedish kronor", "t_symbol": "SEK", "t_type": "1"}],
+    )
+    populate(
+        skrooge_db,
+        "account",
+        [
+            {"id": 1, "t_name": "Savings", "t_type": "C"},
+            {"id": 2, "t_name": "Savings", "t_type": "C"},  # duplicate name, different id
+        ],
+    )
+    populate(
+        skrooge_db,
+        "operation",
+        [
+            {"id": 1, "d_date": "2020-01-01", "rd_account_id": 1, "rc_unit_id": 1},
+            {"id": 2, "d_date": "2020-01-01", "rd_account_id": 2, "rc_unit_id": 1},
+        ],
+    )
+    populate(
+        skrooge_db,
+        "suboperation",
+        [
+            {"id": 1, "rd_operation_id": 1, "f_value": 100.0},
+            {"id": 2, "rd_operation_id": 2, "f_value": 25.0},
+        ],
+    )
+    with SkroogeReader(skrooge_db) as reader, caplog.at_level("WARNING"):
+        audits = reader.account_audits()
+    assert len(audits) == 1
+    assert audits["Savings"].cash_balance == 125.0  # both accounts' balances kept, summed
+    assert any("Duplicate account name" in r.message for r in caplog.records)
+
+
 def test_reader_strips_whitespace_from_payee_and_account_names(skrooge_db, populate):
     """Skrooge sometimes stores stray leading/trailing spaces in names; Firefly
     trims them on account creation, so we normalise at read time to keep the

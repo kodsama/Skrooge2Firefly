@@ -466,3 +466,32 @@ def test_subcent_threshold_scales_for_three_decimal_currency(skrooge_db: Path, p
     assert not any(t.external_id == "skrooge:op:1" for t in m.transactions)
     txn = next(t for t in m.transactions if t.external_id == "skrooge:op:2")
     assert txn.splits[0].amount == Decimal("0.001")
+
+
+def test_operation_with_missing_account_is_skipped_with_warning(skrooge_db: Path, populate):
+    """Skrooge's schema has no FK enforcement, so a deleted account can leave
+    orphaned operations referencing an account id that no longer exists. That
+    must not crash the whole import — the operation is skipped and warned
+    about instead (Fix A)."""
+    _base(populate, skrooge_db)
+    populate(
+        skrooge_db,
+        "operation",
+        [
+            {
+                "id": 20,
+                "d_date": "2020-01-01",
+                "rd_account_id": 999,  # no such account
+                "r_payee_id": 5,
+                "rc_unit_id": 1,
+            },
+        ],
+    )
+    populate(
+        skrooge_db,
+        "suboperation",
+        [{"id": 20, "rd_operation_id": 20, "r_category_id": 7, "f_value": -10.0}],
+    )
+    m = _map(skrooge_db)  # must not raise
+    assert not any(t.external_id.startswith("skrooge:op:20") for t in m.transactions)
+    assert any("unknown account 999" in w for w in m.warnings)
